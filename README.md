@@ -7,9 +7,9 @@ Chrome Manifest V3 eklentisi. Popup'ta girilen Futbin URL'lerini sırayla açar;
 1. Chrome'da `chrome://extensions` adresini açın.
 2. **Geliştirici modu** seçeneğini etkinleştirin.
 3. **Paketlenmemiş öğe yükle** ile bu proje klasörünü seçin.
-4. Araç çubuğundan eklenti simgesine tıklayın. Chrome'un 800 px action-popup sınırını aşan, 1200 px genişliğinde kalıcı monitor penceresi açılır; taramayı buradan başlatın.
+4. Araç çubuğundan eklenti simgesine tıklayın. Chrome'un varsayılan action popup'ı açılır; taramayı buradan başlatın.
 
-Varsayılan kuyruk, `club=1&league=2216,13` filtresiyle sayfa 1–5 adreslerini içerir. Tarama mevcut sekmeyi sırayla bu adreslere yönlendirir. Popup kapansa veya sayfa yenilense bile çalışma durumu arka planda aktif kalır ve popup yeniden açıldığında gösterilir.
+Varsayılan kuyruk, `club=1&league=2216,13` filtresiyle sayfa 1–5 adreslerini içerir. Tarama, popup'ın yönlendirme sırasında kapanmaması için pasif bir çalışma sekmesini sırayla bu adreslere yönlendirir. Popup kullanıcı tarafından kapatılsa bile işlem arka planda aktif kalır ve popup yeniden açıldığında aynı durum gösterilir.
 
 ## Mimari
 

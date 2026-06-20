@@ -53,21 +53,29 @@ function parsePlayerRow(row) {
   const playerLink = row.querySelector("a.table-player-name, a.player-row-playercard");
   const href = playerLink?.getAttribute("href") || "";
   const playerImage = row.querySelector('.playercard-26 img[class*="base-img"], img[src*="/players/"]');
+  const cardImage = row.querySelector('.playercard-26 img[class*="-bg"], img[src*="/cards/"]');
+  const fullName = readText(row, ".table-player-name") || row.querySelector('[class*="playercard"]')?.getAttribute("title");
+  const revision = readText(row, ".table-player-revision");
+  const qualityName = qualityFromCardImage(cardImage?.currentSrc || cardImage?.src);
   const heightText = readText(row, ".table-height div:first-child");
   const bodyText = readText(row, ".table-height");
   const strongFootSrc = row.querySelector(".table-foot img")?.getAttribute("src") || "";
 
   return compactObject({
     id: numberFromMatch(href, /\/player\/(\d+)/),
-    name: readText(row, ".table-player-name") || row.querySelector('[class*="playercard"]')?.getAttribute("title"),
+    name: fullName,
+    shortName: playerImage?.getAttribute("alt") || fullName,
+    fullName,
     url: href ? new URL(href, location.origin).href : null,
     image: playerImage?.currentSrc || playerImage?.src || null,
-    revision: readText(row, ".table-player-revision"),
+    revision,
+    quality: compactObject({ name: qualityName, image: cardImage?.currentSrc || cardImage?.src || null }),
+    rarity: compactObject({ name: revision, image: cardImage?.currentSrc || cardImage?.src || null }),
     rating: numberFromText(readText(row, ".table-rating")),
     position: readText(row, ".table-pos-main"),
     prices: compactObject({
-      playstation: numberFromText(readText(row, ".platform-ps-only .price")),
-      pc: numberFromText(readText(row, ".platform-pc-only .price"))
+      playstation: priceFromText(readText(row, ".platform-ps-only .price")),
+      pc: priceFromText(readText(row, ".platform-pc-only .price"))
     }),
     futbinRating: numberFromText(readText(row, ".futbin-rating-tag")),
     club: imageEntity(row, ".table-player-club", "club"),
@@ -100,10 +108,26 @@ function readText(root, selector) {
   return root.querySelector(selector)?.textContent?.trim() || null;
 }
 
+function qualityFromCardImage(imageUrl) {
+  if (!imageUrl) return null;
+  const filename = decodeURIComponent(imageUrl).split("?")[0].split("/").pop() || "";
+  const quality = filename.match(/_([a-z]+)\.(?:png|webp|jpg|jpeg)$/i)?.[1];
+  return quality ? quality.charAt(0).toUpperCase() + quality.slice(1) : null;
+}
+
 function numberFromText(value) {
   if (!value) return null;
   const normalized = value.replace(/[^\d.,-]/g, "").replace(/,/g, "");
   const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function priceFromText(value) {
+  if (!value) return null;
+  const match = value.trim().replace(/,/g, "").match(/([\d.]+)\s*([KM])?/i);
+  if (!match) return null;
+  const multiplier = match[2]?.toUpperCase() === "M" ? 1000000 : match[2]?.toUpperCase() === "K" ? 1000 : 1;
+  const parsed = Number(match[1]) * multiplier;
   return Number.isFinite(parsed) ? parsed : null;
 }
 

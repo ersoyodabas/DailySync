@@ -21,28 +21,6 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!saved[RECORDS_KEY]) await chrome.storage.local.set({ [RECORDS_KEY]: [] });
 });
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (tab?.id) await chrome.storage.local.set({ monitorTargetTabId: tab.id });
-  await openMonitorWindow();
-});
-
-async function openMonitorWindow() {
-  const popupUrl = chrome.runtime.getURL("src/popup.html");
-  const existingTabs = await chrome.tabs.query({ url: popupUrl });
-  const existing = existingTabs[0];
-  if (existing?.windowId) {
-    await chrome.windows.update(existing.windowId, { focused: true });
-    return;
-  }
-  await chrome.windows.create({
-    url: popupUrl,
-    type: "popup",
-    width: 1240,
-    height: 760,
-    focused: true
-  });
-}
-
 chrome.runtime.onStartup.addListener(async () => {
   await resumeMonitor();
 });
@@ -83,7 +61,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_MONITOR":
-      return startMonitor(message.urls, message.waitMs, message.tabId);
+      return startMonitor(message.urls, message.waitMs);
     case "STOP_MONITOR":
       await stopMonitor("Kullanıcı tarafından durduruldu");
       return { ok: true };
@@ -110,16 +88,12 @@ function validateUrls(urls) {
   });
 }
 
-async function startMonitor(rawUrls, rawWaitMs, requestedTabId) {
+async function startMonitor(rawUrls, rawWaitMs) {
   const queue = validateUrls(rawUrls);
   const waitMs = Math.min(60000, Math.max(1500, Number(rawWaitMs) || 5000));
   await chrome.alarms.clear(NEXT_ALARM);
 
-  let tab;
-  if (Number.isInteger(requestedTabId)) {
-    try { tab = await chrome.tabs.get(requestedTabId); } catch { /* Yeni sekme oluştur. */ }
-  }
-  if (!tab) tab = await chrome.tabs.create({ active: true });
+  const tab = await chrome.tabs.create({ url: "about:blank", active: false });
 
   const state = {
     running: true,
@@ -133,7 +107,7 @@ async function startMonitor(rawUrls, rawWaitMs, requestedTabId) {
     updatedAt: Date.now()
   };
   await setState(state);
-  await chrome.tabs.update(tab.id, { url: queue[0], active: true });
+  await chrome.tabs.update(tab.id, { url: queue[0], active: false });
   return { ok: true, state };
 }
 
@@ -181,7 +155,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   });
 
   try {
-    await chrome.tabs.update(state.tabId, { url: nextUrl, active: true });
+    await chrome.tabs.update(state.tabId, { url: nextUrl, active: false });
   } catch {
     await stopMonitor("Çalışma sekmesine erişilemedi");
   }
@@ -207,12 +181,30 @@ async function savePlayerData(message, sender) {
 
   const stored = await chrome.storage.local.get(RECORDS_KEY);
   const current = stored[RECORDS_KEY] || [];
-  const known = new Set(current.map(recordFingerprint));
-  const unique = incoming.filter((record) => !known.has(recordFingerprint(record)));
-  if (unique.length) {
-    await chrome.storage.local.set({ [RECORDS_KEY]: [...unique, ...current].slice(0, MAX_RECORDS) });
+  const merged = [...current];
+  const indexes = new Map(merged.map((record, index) => [recordFingerprint(record), index]));
+  let added = 0;
+  let changed = false;
+  for (const record of incoming) {
+    const fingerprint = recordFingerprint(record);
+    const existingIndex = indexes.get(fingerprint);
+    if (existingIndex === undefined) {
+      merged.unshift(record);
+      added += 1;
+      changed = true;
+      indexes.clear();
+      merged.forEach((item, index) => indexes.set(recordFingerprint(item), index));
+    } else if (informationScore(record.player) > informationScore(merged[existingIndex].player)) {
+      merged[existingIndex] = record;
+      changed = true;
+    }
   }
-  return { ok: true, added: unique.length };
+  if (changed) await chrome.storage.local.set({ [RECORDS_KEY]: merged.slice(0, MAX_RECORDS) });
+  return { ok: true, added };
+}
+
+function informationScore(player) {
+  try { return JSON.stringify(player || {}).length; } catch { return 0; }
 }
 
 function recordFingerprint(record) {

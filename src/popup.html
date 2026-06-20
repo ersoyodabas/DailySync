@@ -8,24 +8,16 @@
 </head>
 <body>
   <main class="app-shell">
-    <section class="player-table-panel">
+    <section class="player-list-panel">
       <div class="table-title">
         <div class="title-with-icon">
           <span class="title-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span>
-          <div><span class="eyebrow">OKUNAN VERİLER</span><h2>Oyuncu tablosu</h2></div>
+          <div><span class="eyebrow">OKUNAN VERİLER</span><h2>Oyuncular</h2></div>
         </div>
-        <span class="scroll-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18 6-6-6-6M21 12H3"/></svg> Yatay kaydır</span>
+        <span class="scroll-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h13M10 17h10"/></svg> League / Club</span>
       </div>
-      <div class="table-scroll">
-        <table class="player-table">
-          <thead><tr>
-            <th>ID</th><th>Oyuncu</th><th>Revizyon</th><th>OVR</th><th>POS</th>
-            <th>PS Fiyat</th><th>PC Fiyat</th><th>Futbin</th><th>Kulüp</th><th>Ülke</th><th>Lig</th>
-            <th>Ayak</th><th>SM</th><th>WF</th><th>PAC</th><th>SHO</th><th>PAS</th><th>DRI</th><th>DEF</th><th>PHY</th>
-            <th>Popülerlik</th><th>IGS</th><th>Boy</th><th>Kilo</th><th>Vücut</th><th>Accelerate</th><th>Kaynak</th><th>Sayfa</th>
-          </tr></thead>
-          <tbody id="records"><tr><td colspan="28" class="empty">Henüz oyuncu verisi yok.</td></tr></tbody>
-        </table>
+      <div class="player-list-scroll">
+        <div id="records" class="player-list"><div class="empty">Henüz oyuncu verisi yok.</div></div>
       </div>
     </section>
 

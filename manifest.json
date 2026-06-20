@@ -10,7 +10,8 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Futbin Player Monitor"
+    "default_title": "Futbin Player Monitor",
+    "default_popup": "src/popup.html"
   },
   "content_scripts": [
     {
