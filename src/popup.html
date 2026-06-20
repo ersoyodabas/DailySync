@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Futbin Player Monitor</title>
+  <title>Futbin Player Sync</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -14,7 +14,7 @@
           <span class="title-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span>
           <div><span class="eyebrow">OKUNAN VERİLER</span><h2>Oyuncular</h2></div>
         </div>
-        <span class="scroll-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h13M10 17h10"/></svg> League / Club</span>
+        <span id="currentClub" class="scroll-hint">Kulüp bekleniyor</span>
       </div>
       <div class="player-list-scroll">
         <div id="records" class="player-list"><div class="empty">Henüz oyuncu verisi yok.</div></div>
@@ -25,30 +25,31 @@
       <header>
         <div class="title-with-icon">
           <span class="title-icon small"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7l-8-4Z"/><path d="m9 12 2 2 4-4"/></svg></span>
-          <div><span class="eyebrow">FUTBIN SYNC</span><h1>Player Monitor</h1></div>
+          <div><span class="eyebrow">FUTBIN SYNC</span><h1>Club Player Sync</h1></div>
         </div>
         <span id="statusDot" class="dot"></span>
       </header>
 
       <section class="controls">
-        <label for="urls">Taranacak adresler <small>Sayfa 1–5</small></label>
-        <textarea id="urls" rows="5" spellcheck="false"></textarea>
         <div class="setting">
-          <label for="waitMs">Sayfa bekleme süresi</label>
-          <select id="waitMs">
+          <select id="apiEnvironment" aria-label="Backend ortamı">
+            <option value="http://localhost:5055/api/">Local · localhost:5055</option>
+            <option value="https://api.sbcmonster.com/api/">Production · api.sbcmonster.com</option>
+          </select>
+        </div>
+        <div class="setting">
+          <select id="waitMs" aria-label="Sayfalar arası bekleme">
             <option value="3000">3 saniye</option>
             <option value="5000" selected>5 saniye</option>
             <option value="10000">10 saniye</option>
             <option value="20000">20 saniye</option>
           </select>
         </div>
-        <div class="actions">
-          <button id="stop" class="secondary"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Durdur</span></button>
-          <button id="start" class="primary">
-            <svg class="button-icon play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg>
-            <svg class="button-icon spinner" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M21 12a9 9 0 0 0-9-9"/></svg>
-            <span id="startLabel">Taramayı başlat</span>
-          </button>
+        <div class="actions sync-actions">
+          <button id="resume" class="secondary"><span>Resume</span></button>
+          <button id="start" class="primary"><span id="startLabel">Start</span></button>
+          <button id="stop" class="secondary"><span>Stop</span></button>
+          <button id="clear" class="link"><span>Clear</span></button>
         </div>
         <p id="error" class="error" hidden></p>
       </section>
@@ -56,16 +57,23 @@
       <section class="monitor">
         <div class="monitor-head">
           <div><span class="eyebrow">CANLI DURUM</span><strong id="status">Hazır</strong></div>
-          <button id="clear" class="link"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg><span>Temizle</span></button>
         </div>
         <div class="progress"><span id="progressBar"></span></div>
         <div class="countdown-box">
           <span class="countdown-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
-          <div><small>SONRAKİ TARAMA</small><b id="countdown">Bekliyor</b></div>
+          <div><small>SONRAKİ ADIM</small><b id="countdown">Bekliyor</b></div>
         </div>
-        <div class="stats">
-          <div><b id="pageCount">0 / 0</b><small>Sayfa</small></div>
-          <div><b id="recordCount">0</b><small>Kayıt</small></div>
+        <div class="stats sync-stats">
+          <div><b id="clubCount">0 / 0</b><small>Club</small></div>
+          <div><b id="pageCount">0 / 0</b><small>Page</small></div>
+          <div><b id="recordCount">0</b><small>Read</small></div>
+          <div><b id="savedCount">0</b><small>Save</small></div>
+          <div><b id="skippedCount">0</b><small>Skip</small></div>
+        </div>
+        <div class="logs">
+          <div class="logs-head"><span class="eyebrow">REQUEST URL LOGS</span><small id="logCount">0 kayıt</small></div>
+          <div id="errorLogs" class="error-logs" hidden></div>
+          <div id="logs" class="logs-list"><div class="logs-empty">Henüz request gönderilmedi.</div></div>
         </div>
       </section>
     </aside>

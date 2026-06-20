@@ -1,6 +1,6 @@
-# Futbin Player Monitor
+# Futbin Club Player Sync
 
-Chrome Manifest V3 eklentisi. Popup'ta girilen Futbin URL'lerini sırayla açar; sayfadaki `.player-row` satırlarını ayrıntılı oyuncu JSON'una dönüştürür. Ayrıca JSON ağ yanıtları ve gömülü JSON scriptleri de izlenir. Bulunan veriler hem sayfanın DevTools konsoluna hem eklenti service worker konsoluna JSON olarak yazılır ve popup'ta gösterilir.
+Chrome Manifest V3 eklentisi. Backend `GET /api/sync/futbin-player-jobs` yanıtından lig/kulüp kuyruğuyla birlikte nation, quality, rarity ve position lookup verilerini alır. Futbin `.player-row` verilerini tarayıcıda DB ID'lerine map eder ve her kulübün player tablosuna hazır verisini `POST /api/sync/futbin-player-clubs/{clubId}` üzerinden kaydeder.
 
 ## Kurulum
 
@@ -9,13 +9,12 @@ Chrome Manifest V3 eklentisi. Popup'ta girilen Futbin URL'lerini sırayla açar;
 3. **Paketlenmemiş öğe yükle** ile bu proje klasörünü seçin.
 4. Araç çubuğundan eklenti simgesine tıklayın. Chrome'un varsayılan action popup'ı açılır; taramayı buradan başlatın.
 
-Varsayılan kuyruk, `club=1&league=2216,13` filtresiyle sayfa 1–5 adreslerini içerir. Tarama, popup'ın yönlendirme sırasında kapanmaması için pasif bir çalışma sekmesini sırayla bu adreslere yönlendirir. Popup kullanıcı tarafından kapatılsa bile işlem arka planda aktif kalır ve popup yeniden açıldığında aynı durum gösterilir.
+Popup'tan Local (`http://localhost:5055/api/`) veya Production (`https://api.sbcmonster.com/api/`) ortamı seçilir. Tarama pasif bir çalışma sekmesinde yapılır; ilerleme `chrome.storage.local` içinde tutulduğu için popup kapatılsa veya service worker uyusa da devam eder.
 
 ## Mimari
 
-- `src/page-bridge.js`: Sayfanın ana JavaScript ortamında `fetch` ve XHR JSON yanıtlarını gözlemler.
-- `src/content.js`: Ham JSON içinden oyuncuya benzeyen nesneleri bulur, DOM/script yedeğini çalıştırır ve sonuçları iletir.
-- `src/background.js`: URL kuyruğunu, çalışma sekmesini, kayıtları ve zamanlamayı yönetir.
+- `src/content.js`: Futbin filtrelerini doğrular, pagination ve oyuncu satırlarını ayrıştırır, 5 saniyelik sayfa geçiş zamanlayıcısını çalıştırır.
+- `src/background.js`: Backend kuyruğunu, kulüp/sayfa durumunu, çalışma sekmesini ve API kayıtlarını yönetir.
 - `src/popup.*`: Kontrol ve canlı monitör ekranıdır.
 
-Kayıtlar `chrome.storage.local` içinde tutulur ve son 500 benzersiz kayıtla sınırlandırılır. URL erişimi güvenlik için `https://*.futbin.com/*` ile kısıtlıdır.
+Görüntüleme kayıtları son 500 oyuncuyla sınırlandırılır. Backend endpoint'leri mevcut tasarım gereği kimlik doğrulamasızdır.

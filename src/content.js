@@ -1,187 +1,188 @@
-const MAX_DEPTH = 12;
-const MAX_NODES = 50000;
-let seenObjects = new WeakSet();
-
-window.addEventListener("message", (event) => {
-  if (event.source !== window || event.origin !== location.origin) return;
-  if (event.data?.channel !== "FUTBIN_SYNC" || event.data?.type !== "RAW_JSON") return;
-  processPayload(event.data.payload, event.data.source || "network");
-});
+let collectionInProgress = false;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== "COLLECT_NOW") return;
-  collectEmbeddedData();
-  collectPlayerRows();
-  setTimeout(collectPlayerRows, 1000);
-  setTimeout(collectPlayerRows, 2500);
+  if (message?.type !== "COLLECT_SYNC_PAGE") return;
+  if (collectionInProgress) {
+    sendResponse({ ok: true, duplicate: true });
+    return;
+  }
+  collectionInProgress = true;
+  collectAndPublish(message).finally(() => { collectionInProgress = false; });
   sendResponse({ ok: true });
 });
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => {
-    collectEmbeddedData();
-    collectPlayerRows();
-  }, { once: true });
-} else {
-  collectEmbeddedData();
-  collectPlayerRows();
+async function collectAndPublish(message) {
+  try {
+    const navigation = performance.getEntriesByType("navigation")[0];
+    if (Number(navigation?.responseStatus) >= 400) {
+      const result = await chrome.runtime.sendMessage({
+        type: "SYNC_PAGE_FAILED",
+        page: Number(message.page),
+        pageUrl: location.href,
+        error: `Futbin HTTP ${navigation.responseStatus}: ${location.href}`
+      });
+      scheduleAdvance(result);
+      return;
+    }
+    await waitForPlayerRows(5000);
+    if (Number(message.page) === 1) validateSelectedFilters(message.job);
+    const rows = [...document.querySelectorAll("tr.player-row, .player-row")];
+    const errors = [];
+    const players = [];
+    rows.forEach((row, index) => {
+      try {
+        players.push(parsePlayerRow(row));
+      } catch (error) {
+        errors.push({
+          stage: "parse",
+          message: error.message?.replace(/^\[CRITICAL\]\s*/, "") || `Oyuncu satırı okunamadı. Row: ${index + 1}`,
+          player: { rowIndex: index + 1 }
+        });
+      }
+    });
+    const totalPages = Number(message.page) === 1 ? extractTotalPages() : undefined;
+    const result = await chrome.runtime.sendMessage({
+      type: "SYNC_PAGE_RESULT",
+      page: Number(message.page),
+      pageUrl: location.href,
+      totalPages,
+      players,
+      errors
+    });
+    scheduleAdvance(result);
+  } catch (error) {
+    await chrome.runtime.sendMessage({
+      type: "SYNC_PAGE_CRITICAL",
+      page: Number(message.page),
+      pageUrl: location.href,
+      error: error.message?.includes("[CRITICAL]") ? error.message : `[CRITICAL] ${error.message || error}`
+    }).catch(() => {});
+  }
 }
 
-let rowCollectionTimer;
-const rowObserver = new MutationObserver((mutations) => {
-  const hasPlayerRows = mutations.some(({ addedNodes }) => [...addedNodes].some((node) =>
-    node.nodeType === Node.ELEMENT_NODE && (node.matches?.(".player-row") || node.querySelector?.(".player-row"))
-  ));
-  if (!hasPlayerRows) return;
-  clearTimeout(rowCollectionTimer);
-  rowCollectionTimer = setTimeout(collectPlayerRows, 250);
-});
-rowObserver.observe(document.documentElement, { childList: true, subtree: true });
+function scheduleAdvance(result) {
+  if (result?.action !== "WAIT_AND_ADVANCE" || !result.nextUrl) return;
+  setTimeout(() => {
+    chrome.runtime.sendMessage({ type: "ADVANCE_SYNC", url: result.nextUrl }).catch(() => {});
+  }, Math.max(0, Number(result.waitMs) || 0));
+}
 
-function collectEmbeddedData() {
-  document.querySelectorAll('script[type="application/json"], script#__NEXT_DATA__').forEach((script, index) => {
-    try { processPayload(JSON.parse(script.textContent), `script:${script.id || index}`); } catch { /* noop */ }
+function waitForPlayerRows(timeoutMs) {
+  if (document.querySelector("tr.player-row, .player-row")) return Promise.resolve();
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (document.querySelector("tr.player-row, .player-row") || Date.now() - startedAt >= timeoutMs) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, 250);
   });
 }
 
-function collectPlayerRows() {
-  const players = [...document.querySelectorAll(".player-row")].map(parsePlayerRow).filter((player) => player.id || player.name);
-  publish(players, "dom:.player-row");
+function validateSelectedFilters(job) {
+  const filterNodes = [...document.querySelectorAll(".selected-filters-wrapper a")];
+  if (!filterNodes.length) {
+    throw new Error(`[CRITICAL] Seçili filtreler bulunamadı. League: '${job.league_name}', Club: '${job.club_name}'`);
+  }
+  const filterTexts = filterNodes.map((node) => normalize(node.textContent));
+  const leagueExists = filterTexts.some((text) => sameText(text, job.league_name));
+  const clubExists = filterTexts.some((text) => sameText(text, job.club_name));
+  if (!leagueExists || !clubExists) {
+    throw new Error(`[CRITICAL] Futbin filtreleri uyuşmuyor. Beklenen League: '${job.league_name}', Club: '${job.club_name}'. Gelen: ${filterTexts.join(", ")}`);
+  }
+}
+
+function extractTotalPages() {
+  const wrapper = document.querySelector(".pagination-buttons-wrapper");
+  if (!wrapper) return 1;
+  const pages = [...wrapper.querySelectorAll("a, span")]
+    .map((node) => Number(normalize(node.textContent)))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return pages.length ? Math.max(...pages) : 1;
 }
 
 function parsePlayerRow(row) {
-  const playerLink = row.querySelector("a.table-player-name, a.player-row-playercard");
-  const href = playerLink?.getAttribute("href") || "";
-  const playerImage = row.querySelector('.playercard-26 img[class*="base-img"], img[src*="/players/"]');
-  const cardImage = row.querySelector('.playercard-26 img[class*="-bg"], img[src*="/cards/"]');
-  const fullName = readText(row, ".table-player-name") || row.querySelector('[class*="playercard"]')?.getAttribute("title");
-  const revision = readText(row, ".table-player-revision");
-  const qualityName = qualityFromCardImage(cardImage?.currentSrc || cardImage?.src);
-  const heightText = readText(row, ".table-height div:first-child");
-  const bodyText = readText(row, ".table-height");
-  const strongFootSrc = row.querySelector(".table-foot img")?.getAttribute("src") || "";
+  const linkNode = row.querySelector("a.player-row-playercard");
+  const href = linkNode?.getAttribute("href") || "";
+  if (!href) throw new Error("[CRITICAL] Player link node (href) bulunamadı!");
+  const playerLink = new URL(href, "https://www.futbin.com").href;
+  const idMatch = playerLink.match(/\/player\/(\d+)/);
+  if (!idMatch) throw new Error(`[CRITICAL] Futbin ID ayrıştırılamadı! URL: ${playerLink}`);
 
-  return compactObject({
-    id: numberFromMatch(href, /\/player\/(\d+)/),
-    name: fullName,
-    shortName: playerImage?.getAttribute("alt") || fullName,
-    fullName,
-    url: href ? new URL(href, location.origin).href : null,
-    image: playerImage?.currentSrc || playerImage?.src || null,
-    revision,
-    quality: compactObject({ name: qualityName, image: cardImage?.currentSrc || cardImage?.src || null }),
-    rarity: compactObject({ name: revision, image: cardImage?.currentSrc || cardImage?.src || null }),
-    rating: numberFromText(readText(row, ".table-rating")),
-    position: readText(row, ".table-pos-main"),
-    prices: compactObject({
-      playstation: priceFromText(readText(row, ".platform-ps-only .price")),
-      pc: priceFromText(readText(row, ".platform-pc-only .price"))
-    }),
-    futbinRating: numberFromText(readText(row, ".futbin-rating-tag")),
-    club: imageEntity(row, ".table-player-club", "club"),
-    nation: imageEntity(row, ".table-player-nation", "nation"),
-    league: imageEntity(row, ".table-player-league", "league"),
-    strongFoot: strongFootSrc.match(/foot-(left|right)/i)?.[1]?.toUpperCase() || null,
-    skillMoves: numberFromText(readText(row, ".table-skills")),
-    weakFoot: numberFromText(readText(row, ".table-weak-foot")),
-    stats: compactObject({
-      pace: numberFromText(readText(row, ".table-pace")),
-      shooting: numberFromText(readText(row, ".table-shooting")),
-      passing: numberFromText(readText(row, ".table-passing")),
-      dribbling: numberFromText(readText(row, ".table-dribbling")),
-      defending: numberFromText(readText(row, ".table-defending")),
-      physicality: numberFromText(readText(row, ".table-physicality"))
-    }),
-    popularity: numberFromText(readText(row, ".table-popularity")),
-    inGameStats: numberFromText(readText(row, ".table-in-game-stats")),
-    height: compactObject({
-      text: heightText,
-      cm: numberFromMatch(heightText, /(\d+)\s*cm/i),
-      weightKg: numberFromMatch(bodyText, /\((\d+)\s*kg\)/i),
-      bodyType: row.querySelector('.table-height a[href*="body_type"]')?.textContent?.trim() || null,
-      accelerate: row.querySelector('.table-height a[href*="accelerate"]')?.textContent?.trim() || null
-    })
-  });
+  const name = readText(row, "a.table-player-name");
+  if (!name) throw new Error(`[CRITICAL] Oyuncu ismi okunamadı! ID: ${idMatch[1]}`);
+
+  const rating = integerFromText(readText(row, ".table-rating .rating-square") || readText(row, ".table-rating"));
+  if (!rating) throw new Error(`[CRITICAL] Rating okunamadı! Oyuncu: ${name} (${idMatch[1]})`);
+
+  const fallbackPriceNode = row.querySelector(".table-price .price");
+  const consolePriceNode = row.querySelector(".platform-ps-only .price") || fallbackPriceNode;
+  const pcPriceNode = row.querySelector(".platform-pc-only .price") || fallbackPriceNode;
+  if (!consolePriceNode || !pcPriceNode) throw new Error(`[CRITICAL] Fiyat düğümü bulunamadı! Oyuncu: ${name}`);
+
+  const nationImage = row.querySelector("img.nation, .table-player-nation img");
+  const nationName = normalize(nationImage?.getAttribute("title") || nationImage?.getAttribute("alt"));
+  if (!nationName) throw new Error(`[CRITICAL] Ulus ismi okunamadı! Oyuncu: ${name}`);
+
+  const positionName = readText(row, ".table-pos .table-pos-main span") || readText(row, ".table-pos-main");
+  if (!positionName) throw new Error(`[CRITICAL] Pozisyon ismi okunamadı! Oyuncu: ${name}`);
+
+  const cardImage = row.querySelector("img.playercard-s-26-bg, img[class*='playercard'][class*='bg'], img[src*='/cards/']");
+  const cardImageUrl = cardImage?.currentSrc || cardImage?.src || "";
+  if (!cardImageUrl) throw new Error(`[CRITICAL] Kart görseli bulunamadı! Oyuncu: ${name}`);
+
+  const playerImage = row.querySelector(".table-name img.playercard-s-base-img, img[class*='base-img'], img[src*='/players/']");
+  const playerImageUrl = firstSrcSetUrl(playerImage?.getAttribute("srcset")) || playerImage?.currentSrc || playerImage?.src || null;
+  const leagueImage = row.querySelector(".table-player-league img");
+  const clubImage = row.querySelector(".table-player-club img");
+
+  return {
+    futbinPlayerId: Number(idMatch[1]),
+    futbinPlayerLink: playerLink,
+    name,
+    rating,
+    priceConsole: parseFutbinPrice(consolePriceNode.textContent),
+    pricePc: parseFutbinPrice(pcPriceNode.textContent),
+    nationName,
+    nationImageUrl: nationImage?.currentSrc || nationImage?.src || null,
+    leagueImageUrl: leagueImage?.currentSrc || leagueImage?.src || null,
+    clubImageUrl: clubImage?.currentSrc || clubImage?.src || null,
+    positionName,
+    alternativePositions: readText(row, ".xs-font.text-faded.bold") || null,
+    cardImageUrl,
+    playerImageUrl
+  };
 }
 
 function readText(root, selector) {
-  return root.querySelector(selector)?.textContent?.trim() || null;
+  return normalize(root.querySelector(selector)?.textContent);
 }
 
-function qualityFromCardImage(imageUrl) {
-  if (!imageUrl) return null;
-  const filename = decodeURIComponent(imageUrl).split("?")[0].split("/").pop() || "";
-  const quality = filename.match(/_([a-z]+)\.(?:png|webp|jpg|jpeg)$/i)?.[1];
-  return quality ? quality.charAt(0).toUpperCase() + quality.slice(1) : null;
+function normalize(value) {
+  return String(value || "").trim().replace(/\s+/g, " ");
 }
 
-function numberFromText(value) {
-  if (!value) return null;
-  const normalized = value.replace(/[^\d.,-]/g, "").replace(/,/g, "");
-  const parsed = Number(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
+function sameText(left, right) {
+  return normalize(left).localeCompare(normalize(right), undefined, { sensitivity: "accent" }) === 0;
 }
 
-function priceFromText(value) {
-  if (!value) return null;
-  const match = value.trim().replace(/,/g, "").match(/([\d.]+)\s*([KM])?/i);
-  if (!match) return null;
-  const multiplier = match[2]?.toUpperCase() === "M" ? 1000000 : match[2]?.toUpperCase() === "K" ? 1000 : 1;
-  const parsed = Number(match[1]) * multiplier;
-  return Number.isFinite(parsed) ? parsed : null;
+function integerFromText(value) {
+  const parsed = Number(String(value || "").replace(/[^\d-]/g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function numberFromMatch(value, pattern) {
-  const parsed = Number(String(value || "").match(pattern)?.[1]);
-  return Number.isFinite(parsed) ? parsed : null;
+function parseFutbinPrice(value) {
+  let text = normalize(value).toUpperCase();
+  let multiplier = 1;
+  if (text.endsWith("K")) { multiplier = 1000; text = text.slice(0, -1); }
+  else if (text.endsWith("M")) { multiplier = 1000000; text = text.slice(0, -1); }
+  const clean = [...text].filter((char) => /[\d.,]/.test(char)).join("").replace(",", ".");
+  const parsed = Number(clean);
+  return Number.isFinite(parsed) ? Math.round(parsed * multiplier) : 0;
 }
 
-function imageEntity(row, selector, queryKey) {
-  const anchor = row.querySelector(selector);
-  if (!anchor) return null;
-  const image = anchor.querySelector("img");
-  const href = anchor.getAttribute("href") || "";
-  return compactObject({
-    id: numberFromMatch(href, new RegExp(`[?&]${queryKey}=(\\d+)`)),
-    name: image?.getAttribute("title") || null,
-    image: image?.currentSrc || image?.src || null
-  });
-}
-
-function compactObject(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined && item !== ""));
-}
-
-function processPayload(payload, source) {
-  seenObjects = new WeakSet();
-  const players = [];
-  let visited = 0;
-
-  function walk(value, depth) {
-    if (depth > MAX_DEPTH || visited++ > MAX_NODES || value == null) return;
-    if (typeof value !== "object") return;
-    if (seenObjects.has(value)) return;
-    seenObjects.add(value);
-
-    if (!Array.isArray(value) && looksLikePlayer(value)) players.push(value);
-    for (const child of Object.values(value)) walk(child, depth + 1);
-  }
-
-  walk(payload, 0);
-  publish(players.slice(0, 1000), source);
-}
-
-function looksLikePlayer(value) {
-  const keys = Object.keys(value).map((key) => key.toLowerCase());
-  const hasIdentity = keys.some((key) => ["playerid", "player_id", "resource_id", "resourceid", "name", "playername"].includes(key));
-  const signals = ["rating", "overall", "position", "nation", "league", "club", "price", "pace", "shooting"];
-  return hasIdentity && signals.filter((key) => keys.some((candidate) => candidate.includes(key))).length >= 2;
-}
-
-function publish(players, source) {
-  if (!players.length) return;
-  console.groupCollapsed(`[Futbin Sync] ${players.length} oyuncu yakalandı (${source})`);
-  console.log(JSON.stringify(players, null, 2));
-  console.groupEnd();
-  chrome.runtime.sendMessage({ type: "PLAYER_DATA", pageUrl: location.href, source, players }).catch(() => {});
+function firstSrcSetUrl(srcset) {
+  const first = String(srcset || "").split(",").map((value) => value.trim()).filter(Boolean)[0];
+  return first ? first.split(/\s+/)[0] : null;
 }
