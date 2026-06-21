@@ -24,6 +24,7 @@ const emptyState = {
   lookups: null,
   currentPlayers: {},
   currentLatest: null,
+  newlyInsertedCoinCardIds: [],
   currentSkipped: 0,
   pagesAttempted: 0,
   pagesSucceeded: 0,
@@ -125,6 +126,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
   if (previous.tabId) {
     try { await chrome.tabs.remove(previous.tabId); } catch { /* Eski sekme zaten kapanmış olabilir. */ }
   }
+  if (operations.includes("coin-cards")) await clearCoinCardDisplayData();
 
   if (queue.length === 0) {
     const state = {
@@ -312,7 +314,11 @@ async function handlePageResult(message, sender) {
     }
   }
   if (pageErrors.length) await appendErrors(pageErrors);
-  await appendRecords(mappedPlayers, state.currentUrl, job);
+  const initialSaveStatus = isCoinCardJob && (state.newlyInsertedCoinCardIds || [])
+    .some((id) => Number(id) === Number(job.id))
+    ? "inserted"
+    : null;
+  await appendRecords(mappedPlayers, state.currentUrl, job, initialSaveStatus);
 
   const updated = {
     ...state,
@@ -485,8 +491,11 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
   let updated = 0;
   let deleted = 0;
   let skipped = state.currentSkipped || 0;
+  let jobsBeforeInsert = [];
 
   if (state.currentLatest) {
+    const jobsBeforeResponse = await apiRequest(state.apiBaseUrl, "futbin-sync/coin-card-jobs");
+    jobsBeforeInsert = Array.isArray(jobsBeforeResponse?.data?.jobs) ? jobsBeforeResponse.data.jobs : [];
     await setState({
       ...state,
       nextRunAt: null,
@@ -518,9 +527,34 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
   const jobsResponse = await apiRequest(state.apiBaseUrl, "futbin-sync/coin-card-jobs");
   const detailJobs = (Array.isArray(jobsResponse?.data?.jobs) ? jobsResponse.data.jobs : [])
     .map((detailJob) => ({ ...detailJob, operation: "coin-cards" }));
+  const previousJobIds = new Set(jobsBeforeInsert.map((detailJob) => Number(detailJob.id)));
+  const submittedLatestUrls = new Set((state.currentLatest?.cards || []).map((card) => coinCardUrlKey(card?.url)).filter(Boolean));
+  const addedJobs = detailJobs
+    .filter((detailJob) => Number.isInteger(Number(detailJob.id)) && !previousJobIds.has(Number(detailJob.id)));
+  const matchingInsertedJobs = addedJobs
+    .filter((detailJob) => submittedLatestUrls.has(coinCardUrlKey(detailJob.url)));
+  const newlyInsertedJobs = inserted > 0
+    ? (matchingInsertedJobs.length >= inserted ? matchingInsertedJobs : addedJobs).slice(-inserted)
+    : [];
+  const newlyInsertedCoinCardIds = newlyInsertedJobs.map((detailJob) => Number(detailJob.id));
+  const latestCardsByUrl = new Map((state.currentLatest?.cards || [])
+    .map((card) => [coinCardUrlKey(card?.url), card])
+    .filter(([url]) => Boolean(url)));
+  for (const detailJob of newlyInsertedJobs) {
+    const latestCard = latestCardsByUrl.get(coinCardUrlKey(detailJob.url)) ||
+      (state.currentLatest?.cards || []).find((card) => sameLookupText(card?.playerName, detailJob.label));
+    if (!latestCard) continue;
+    await appendRecords(
+      [toCoinCardDisplayPlayer(latestCard, detailJob)],
+      detailJob.url,
+      detailJob,
+      "inserted"
+    );
+  }
+  const updateJobs = detailJobs.filter((detailJob) => !newlyInsertedCoinCardIds.includes(Number(detailJob.id)));
   const queue = [
     ...state.queue.slice(0, state.currentJobIndex + 1),
-    ...detailJobs,
+    ...updateJobs,
     ...state.queue.slice(state.currentJobIndex + 1)
   ];
   const clubSaveResults = {
@@ -552,6 +586,7 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
     currentUrl: nextUrl,
     currentPlayers: {},
     currentLatest: null,
+    newlyInsertedCoinCardIds,
     currentSkipped: 0,
     pagesAttempted: 0,
     pagesSucceeded: 0,
@@ -571,6 +606,7 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
 async function submitCurrentCoinCardAndPrepareNext(state) {
   const job = currentJob(state);
   const card = state.currentPlayers?.[String(job.id)];
+  const isNewlyInserted = (state.newlyInsertedCoinCardIds || []).some((id) => Number(id) === Number(job.id));
   let saved = 0;
   let skipped = state.currentSkipped || 0;
   let inserted = 0;
@@ -602,14 +638,15 @@ async function submitCurrentCoinCardAndPrepareNext(state) {
         message
       })));
     }
-    const saveStatus = inserted > 0 ? "inserted" : updated > 0 ? "updated" : "unchanged";
+    const saveStatus = isNewlyInserted || inserted > 0 ? "inserted" : updated > 0 ? "updated" : "unchanged";
     await updateRecordSaveStatus(job, saveStatus);
   }
 
   const resultKey = `coin-card:${job.id}`;
+  const reportedUpdated = isNewlyInserted ? 0 : updated;
   const clubSaveResults = {
     ...(state.clubSaveResults || {}),
-    [resultKey]: { saved, skipped, inserted, updated, deleted, posted: card ? 1 : 0, savedAt: Date.now() }
+    [resultKey]: { saved, skipped, inserted, updated: reportedUpdated, deleted, posted: card ? 1 : 0, savedAt: Date.now() }
   };
   const nextJobIndex = state.currentJobIndex + 1;
   if (nextJobIndex >= state.queue.length) {
@@ -896,7 +933,8 @@ function toCoinCardDisplayPlayer(card, job) {
     rating: card.rating,
     qualityCode: "coin",
     rarityName: "Coin Card",
-    priceConsole: card.priceCross || card.pricePc || 0,
+    priceConsole: card.priceCross || null,
+    pricePc: card.pricePc || null,
     urlImgCard: card.bgCardUrl,
     urlImgPlayer: card.playerImgUrl,
     urlImgNation: card.nationImgUrl,
@@ -932,6 +970,16 @@ function dedupeLatestCoinCards(cards) {
     merged.set(key, card);
   }
   return [...merged.values()];
+}
+
+function coinCardUrlKey(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    url.hash = "";
+    return url.href.toLowerCase();
+  } catch {
+    return normalizeText(value).toLowerCase();
+  }
 }
 
 function toApiCoinCard(card) {
@@ -1124,7 +1172,7 @@ function normalizeText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
 
-async function appendRecords(players, pageUrl, job) {
+async function appendRecords(players, pageUrl, job, saveStatus = null) {
   if (!players.length) return;
   const stored = await chrome.storage.local.get(RECORDS_KEY);
   const current = stored[RECORDS_KEY] || [];
@@ -1135,7 +1183,8 @@ async function appendRecords(players, pageUrl, job) {
     job,
     leagueName: player.leagueName || job.league_name,
     clubName: player.clubName || job.club_name,
-    saveStatus: null,
+    saveStatus,
+    processedAt: saveStatus ? Date.now() : null,
     player
   }));
   const merged = new Map(current.map((record) => [record.id, record]));
@@ -1147,8 +1196,19 @@ async function updateRecordSaveStatus(job, saveStatus) {
   const recordId = `${job.operation}:${job.id}:`;
   const stored = await chrome.storage.local.get(RECORDS_KEY);
   const records = stored[RECORDS_KEY] || [];
-  const updated = records.map((r) => r.id.startsWith(recordId) ? { ...r, saveStatus } : r);
+  const processedAt = Date.now();
+  const updated = records.map((r) => r.id.startsWith(recordId) ? { ...r, saveStatus, processedAt } : r);
   await chrome.storage.local.set({ [RECORDS_KEY]: updated });
+}
+
+async function clearCoinCardDisplayData() {
+  const stored = await chrome.storage.local.get([RECORDS_KEY, ERRORS_KEY]);
+  const records = (stored[RECORDS_KEY] || []).filter((record) =>
+    !String(record?.job?.operation || "").startsWith("coin-card"));
+  const errors = (stored[ERRORS_KEY] || []).filter((entry) =>
+    !String(entry?.job?.operation || "").startsWith("coin-card") &&
+    !String(entry?.url || "").includes("coin-card"));
+  await chrome.storage.local.set({ [RECORDS_KEY]: records, [ERRORS_KEY]: errors });
 }
 
 async function getState() {

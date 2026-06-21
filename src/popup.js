@@ -25,7 +25,8 @@ const elements = {
   records: $("#records"),
   error: $("#error"),
   currentClub: $("#currentClub"),
-  listTabs: [...document.querySelectorAll(".list-tab")],
+  contentTabs: [...document.querySelectorAll(".content-tab")],
+  listTitle: $("#listTitle"),
   runCount: $("#runCount")
 };
 
@@ -35,15 +36,17 @@ let currentLogs = [];
 let currentErrors = [];
 let currentListTab = "club-players";
 let selectedApiBaseUrl = LOCAL_API_BASE_URL;
+const collapsedCoinSections = new Set();
 init();
 setInterval(renderCountdown, 250);
 
 async function init() {
-  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncOperations", "syncListTab"]);
+  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncOperations", "syncListTab", "syncContentTab"]);
   setApiEnvironment(settings.syncApiBaseUrl || LOCAL_API_BASE_URL);
   setOperationSelection(Array.isArray(settings.syncOperations) ? settings.syncOperations : ["club-players"]);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
   if (settings.syncListTab) setListTab(settings.syncListTab);
+  setContentTab(settings.syncContentTab || "web-app-sync");
   const snapshot = await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" });
   render(snapshot.syncState || {}, snapshot.playerRecords || [], snapshot.syncLogs || [], snapshot.syncErrors || []);
 }
@@ -109,17 +112,39 @@ elements.operationButtons.forEach((button) => {
   });
 });
 
-elements.listTabs.forEach((tab) => {
+elements.contentTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
-    setListTab(tab.dataset.list);
-    chrome.storage.local.set({ syncListTab: currentListTab });
+    setContentTab(tab.dataset.content);
+    chrome.storage.local.set({
+      syncContentTab: tab.dataset.content,
+      syncListTab: currentListTab
+    });
     renderRecords(currentRecords, currentErrors, currentState);
   });
 });
 
 function setListTab(listName) {
   currentListTab = listName || "club-players";
-  elements.listTabs.forEach((t) => t.classList.toggle("active", t.dataset.list === currentListTab));
+  if (elements.listTitle) {
+    elements.listTitle.textContent = currentListTab === "coin-cards"
+      ? "Futbin Latest Coin Cards"
+      : "Futbin All Players";
+  }
+}
+
+function setContentTab(contentName) {
+  const selectedContent = contentName || "web-app-sync";
+  const selectedTab = elements.contentTabs.find((tab) => tab.dataset.content === selectedContent);
+  if (selectedTab?.dataset.list) setListTab(selectedTab.dataset.list);
+
+  elements.contentTabs.forEach((tab) => {
+    const isSelected = tab.dataset.content === selectedContent;
+    tab.classList.toggle("view-active", isSelected);
+    tab.setAttribute("aria-selected", String(isSelected));
+  });
+  if (elements.listTitle && selectedContent === "web-app-sync") {
+    elements.listTitle.textContent = "Web App Sync";
+  }
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -140,7 +165,20 @@ elements.logs.addEventListener("click", (event) => {
   if (url) chrome.tabs.create({ url, active: true });
 });
 
-elements.records.addEventListener("click", (event) => openSyncRow(event));
+elements.records.addEventListener("click", (event) => {
+  const toggle = event.target.closest(".coin-section-toggle");
+  if (toggle) {
+    const sectionName = toggle.dataset.section;
+    const section = toggle.closest(".coin-cards-group");
+    const willCollapse = !section.classList.contains("collapsed");
+    section.classList.toggle("collapsed", willCollapse);
+    toggle.setAttribute("aria-expanded", String(!willCollapse));
+    if (willCollapse) collapsedCoinSections.add(sectionName);
+    else collapsedCoinSections.delete(sectionName);
+    return;
+  }
+  openSyncRow(event);
+});
 elements.records.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   openSyncRow(event);
@@ -297,7 +335,7 @@ function renderRecords(records, errors = [], state = {}) {
     return isCoinCardsTab ? isCoinCardJob : !isCoinCardJob;
   });
 
-  if (!filteredRecords.length && !filteredErrors.length) {
+  if (!filteredRecords.length && !filteredErrors.length && !isCoinCardsTab) {
     elements.records.innerHTML = '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
     return;
   }
@@ -307,36 +345,29 @@ function renderRecords(records, errors = [], state = {}) {
 
   if (isCoinCards || isCoinCardsTab) {
     const inserted = filteredRecords.filter((r) => r.saveStatus === "inserted");
-    const updated = filteredRecords.filter((r) => r.saveStatus === "updated");
-    const pending = filteredRecords.filter((r) => !r.saveStatus || r.saveStatus === "unchanged");
+    const updated = filteredRecords.filter((r) => r.saveStatus !== "inserted");
 
-    const makeSection = (label, records, extraClass = "") => {
-      if (!records.length) return "";
+    const makeSection = (sectionName, label, records, errors = [], extraClass = "") => {
       const countText = `${records.length} kart`;
-      return `<div class="sync-player-group coin-cards-group ${extraClass}">
-        <div class="league-group sync-group-header coin-section-header"><span class="sync-group-entity"><strong>${escapeHtml(label)}</strong></span><span class="group-count">${escapeHtml(countText)}</span></div>
-        ${renderCoinCardHeader()}
-        ${records.map(renderCoinCardRecord).join("")}
+      const isCollapsed = collapsedCoinSections.has(sectionName);
+      const rows = records.length || errors.length
+        ? `${records.length ? renderCoinCardHeader() : ""}${errors.map(renderErrorRecord).join("")}${records.map(renderCoinCardRecord).join("")}`
+        : '<div class="coin-section-empty">Henüz kayıt yok.</div>';
+      return `<div class="sync-player-group coin-cards-group ${extraClass}${isCollapsed ? " collapsed" : ""}">
+        <div class="league-group sync-group-header coin-section-header">
+          <button class="group-toggle coin-section-toggle" type="button" data-section="${escapeHtml(sectionName)}" aria-expanded="${String(!isCollapsed)}">
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+            <span class="sync-group-entity"><strong>${escapeHtml(label)}</strong></span>
+            <span class="group-count">${escapeHtml(countText)}</span>
+          </button>
+        </div>
+        <div class="coin-section-body">${rows}</div>
       </div>`;
     };
 
-    const errorsHtml = filteredErrors.length
-      ? `<div class="sync-player-group coin-cards-group coin-section-errors">
-          <div class="league-group sync-group-header"><span class="sync-group-entity"><strong>Hatalar</strong></span><span class="group-count">${filteredErrors.length} hata</span></div>
-          ${filteredErrors.slice(0, 300).map(renderErrorRecord).join("")}
-        </div>`
-      : "";
-
-    const pendingLabel = pending.length && !inserted.length && !updated.length
-      ? `Okunan Kartlar (${filteredRecords.length})`
-      : "Bekleyenler / Kaydedilmedi";
-
     elements.records.innerHTML =
-      errorsHtml +
-      makeSection("✦ Yeni Kartlar", inserted, "section-inserted") +
-      makeSection("↑ Güncellenen Kartlar", updated, "section-updated") +
-      makeSection(pendingLabel, pending, "section-pending") ||
-      '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
+      makeSection("inserted", "Yeni Kartlar", inserted, [], "section-inserted") +
+      makeSection("updated", "Güncellenen Kartlar", updated, filteredErrors.slice(0, 300), "section-updated");
     return;
   }
 
@@ -382,31 +413,39 @@ function renderPlayerHeader() {
 }
 
 function renderCoinCardHeader() {
-  return `<div class="club-player-header sync-header coin-card-header"><span>KART</span><span>OYUNCU</span><span>PUAN</span><span>ÜLKE</span><span class="price-header">Fiyat${playstationIcon()}</span></div>`;
+  return `<div class="club-player-header sync-header coin-card-header">
+    <span>KART</span>
+    <span>OYUNCU</span>
+    <span class="price-header">${consolePlatformIcon()}CONSOLE</span>
+    <span class="price-header">${pcPlatformIcon()}PC</span>
+    <span class="date-header">İŞLEM TARİHİ</span>
+  </div>`;
 }
 
 function renderCoinCardRecord(record) {
   const player = record.player || {};
   const futbinUrl = safeFutbinUrl(player.futbinPlayerLink);
-  const cardBg = player.urlImgCard ? `style="background-image:url('${escapeHtml(player.urlImgCard)}')"; ` : "";
   const playerImg = player.urlImgPlayer
     ? `<img class="cc-player-img" src="${escapeHtml(player.urlImgPlayer)}" alt="" loading="lazy">`
     : `<span class="compact-placeholder">—</span>`;
-  const posLabel = player.positionName ? `<span class="cc-pos-label">${escapeHtml(player.positionName)}</span>` : "";
-  const ratingLabel = player.rating != null ? `<span class="cc-rating-label">${escapeHtml(String(player.rating))}</span>` : "";
   const cardCell = `<div class="grid-cell cc-card-cell">
     <div class="cc-card-wrap" ${player.urlImgCard ? `style="background-image:url('${escapeHtml(player.urlImgCard)}')"` : ""}>
       ${playerImg}
-      ${posLabel}
-      ${ratingLabel}
     </div>
+  </div>`;
+  const nation = player.urlImgNation
+    ? `<img class="cc-nation-img" src="${escapeHtml(player.urlImgNation)}" alt="" loading="lazy">`
+    : "";
+  const playerDetails = `<div class="grid-cell cc-player-details" title="${escapeHtml(player.name || "—")}">
+    <strong>${escapeHtml(player.name || "—")}</strong>
+    <span class="cc-player-meta"><b>${escapeHtml(player.rating ?? "—")}</b>${nation}</span>
   </div>`;
   return `<article class="player-data-row sync-row coin-card-row${futbinUrl ? " is-clickable" : ""}"${syncRowLinkAttributes(futbinUrl)} title="${escapeHtml(player.name || "")}">
       ${cardCell}
-      ${cell(player.name, "player-cell")}
-      ${cell(player.rating, "rating-cell")}
-      ${assetCell("", player.urlImgNation, "nation-cell")}
+      ${playerDetails}
       ${priceCell(player.priceConsole)}
+      ${priceCell(player.pricePc)}
+      ${cell(formatProcessedDate(record.processedAt), "processed-date-cell")}
     </article>`;
 }
 
@@ -524,7 +563,22 @@ function priceCell(value) {
 }
 
 function formatPrice(value) {
+  if (value === null || value === undefined || value === "") return "—";
   return Number.isFinite(Number(value)) ? new Intl.NumberFormat("tr-TR").format(Number(value)) : "—";
+}
+
+function formatProcessedDate(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date).replace(",", "");
 }
 
 function coinIcon() {
@@ -533,6 +587,14 @@ function coinIcon() {
 
 function playstationIcon() {
   return '<svg class="playstation-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.1 3.5v13.2l3.1 1V6.8c0-.8.4-1.3 1-1 .8.2 1.2.9 1.2 1.7v4.3c2.1 1 3.7 0 3.7-2.6 0-2.7-1-3.9-3.8-4.9-1.9-.7-3.7-.9-5.2-.8Z"/><path d="M12.8 16.6v2.1l5.8-2.1c.7-.3.8-.7.2-.9-.7-.2-1.9-.2-2.7.1l-3.3.8Zm-1.7-.6-2.3.8c-.7.2-.8.6-.2.8.6.2 1.7.2 2.5-.1v2l-.5.2c-2.5.9-5.2.5-6.3-.4-1-.9-.2-2 2.2-2.9l4.6-1.6V16Z"/></svg>';
+}
+
+function consolePlatformIcon() {
+  return '<svg class="platform-header-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8h10a4 4 0 0 1 3.8 5.2l-1.2 3.6a2 2 0 0 1-3.2.9L14.5 16h-5l-1.9 1.7a2 2 0 0 1-3.2-.9l-1.2-3.6A4 4 0 0 1 7 8Z"/><path d="M8 11v4M6 13h4M16 12h.01M18 14h.01"/></svg>';
+}
+
+function pcPlatformIcon() {
+  return '<svg class="platform-header-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
 }
 
 function escapeHtml(value) {
