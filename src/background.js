@@ -3,13 +3,23 @@ const RECORDS_KEY = "playerRecords";
 const LOGS_KEY = "syncLogs";
 const ERRORS_KEY = "syncErrors";
 const PAGE_TIMEOUT_ALARM = "futbin-sync-page-timeout";
+const SYNC_LOOP_ALARM = "futbin-sync-loop";
 const PAGE_TIMEOUT_MS = 60000;
+const COIN_CARDS_SYNC_LOOP_MINUTES = 5;
+const CLUB_PLAYERS_SYNC_LOOP_MINUTES = 120;
 const MAX_RECORDS = 500;
 const MAX_LOGS = 300;
 const MAX_ERRORS = 300;
 const FUTBIN_LATEST_URL = "https://www.futbin.com/latest";
 const LATEST_COIN_CARD_PAGES = 2;
 const SPECIAL_QUALITY_IMAGE_URL = "https://cdn3.futbin.com/content/fifa26/img/cards/tiny/3_gold.png?fm=png&ixlib=java-2.1.0&verzion=1&w=128&s=d72e95665680dee8e3818602d714323a";
+const RUNNER_IDS = ["coin-cards", "club-players"];
+const RUNNER_OPERATIONS = {
+  "coin-cards": ["coin-cards"],
+  "club-players": ["club-players"]
+};
+let stateWriteQueue = Promise.resolve();
+let storageWriteQueue = Promise.resolve();
 
 const emptyState = {
   running: false,
@@ -63,18 +73,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_SYNC":
-      return startFreshSync(message.apiBaseUrl, message.waitMs, message.operations, 0);
+      return startParallelSync(message.apiBaseUrl, message.waitMs, message.operations);
     case "RESUME_SYNC":
       return resumePausedSync();
     case "STOP_SYNC":
       return pauseSync();
     case "CLEAR_SYNC":
-      await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
-      await chrome.alarms.clear("futbin-sync-loop");
+      await clearAllRunnerAlarms();
       {
         const current = await getState();
+        for (const run of Object.values(current.runs || {})) {
+          if (run?.tabId) {
+            try { await chrome.tabs.remove(run.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+          }
+        }
         if (current.tabId) {
-          try { await chrome.tabs.remove(current.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+          try { await chrome.tabs.remove(current.tabId); } catch { /* Legacy sekme zaten kapanmış olabilir. */ }
         }
       }
       await setState({ ...emptyState, apiBaseUrl: message.apiBaseUrl || emptyState.apiBaseUrl });
@@ -95,12 +109,36 @@ async function handleMessage(message, sender) {
   }
 }
 
-async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0) {
+async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
+  const operations = normalizeOperations(rawOperations);
+  if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
+  const runnerIds = [...new Set(operations.map(operationRunnerId).filter(Boolean))];
+  const results = await Promise.all(runnerIds.map(async (runnerId) => {
+    try {
+      const run = await getState(runnerId);
+      return await startFreshSync(rawApiBaseUrl, rawWaitMs, RUNNER_OPERATIONS[runnerId], run.runCount || 0, runnerId);
+    } catch (error) {
+      const run = await getState(runnerId);
+      await failSync(error.message || String(error), run);
+      return { ok: false, runnerId, error: error.message || String(error) };
+    }
+  }));
+  if (!results.some((result) => result?.ok)) throw new Error(results.map((result) => result?.error).filter(Boolean).join("; ") || "Sync başlatılamadı.");
+  return { ok: true, state: await getState(), results };
+}
+
+async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0, rawRunnerId = null) {
+  const operations = normalizeOperations(rawOperations);
+  if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
+  const runnerId = rawRunnerId || operationRunnerId(operations[0]);
+  if (!runnerId) throw new Error("Desteklenmeyen sync işlemi.");
+  const previous = await getState(runnerId);
+  if (previous.running && !isLoopRestartDue(previous)) {
+    return { ok: true, state: previous, alreadyRunning: true };
+  }
+
   const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl);
   const waitMs = Math.min(30000, Math.max(3000, Number(rawWaitMs) || 5000));
-  const operations = [...new Set(Array.isArray(rawOperations) ? rawOperations : ["club-players"])]
-    .filter((operation) => operation === "club-players" || operation === "coin-cards");
-  if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
 
   const queue = [];
   let lookups = null;
@@ -119,10 +157,9 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
     validateLookups(lookups);
     queue.push(...jobs.map((job) => ({ ...job, operation: "club-players" })));
   }
-  await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
-  await chrome.alarms.clear("futbin-sync-loop");
+  await chrome.alarms.clear(pageTimeoutAlarmName(runnerId));
+  await chrome.alarms.clear(syncLoopAlarmName(runnerId));
 
-  const previous = await getState();
   if (previous.tabId) {
     try { await chrome.tabs.remove(previous.tabId); } catch { /* Eski sekme zaten kapanmış olabilir. */ }
   }
@@ -131,6 +168,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
   if (queue.length === 0) {
     const state = {
       ...emptyState,
+      runnerId,
       apiBaseUrl,
       waitMs,
       operations,
@@ -146,6 +184,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
   const firstJob = queue[0];
   const state = {
     ...emptyState,
+    runnerId,
     running: true,
     queue,
     operations,
@@ -191,8 +230,28 @@ async function resumePausedSync() {
 }
 
 async function resumeRunningSync() {
-  const state = await getState();
+  const root = await getState();
+  if (root.runs) {
+    for (const runnerId of RUNNER_IDS) {
+      const run = await getState(runnerId);
+      if (run.running) await resumeRunningRunner(run);
+    }
+    return;
+  }
+  const state = root;
+  await resumeRunningRunner(state);
+}
+
+async function resumeRunningRunner(state) {
   if (!state.running) return;
+  if (state.nextRunAt) {
+    if (state.nextRunAt <= Date.now()) {
+      await startFreshSync(state.apiBaseUrl, state.waitMs, state.operations, (state.runCount || 0) + 1, state.runnerId);
+    } else {
+      await chrome.alarms.create(syncLoopAlarmName(state), { when: state.nextRunAt });
+    }
+    return;
+  }
   let tab;
   try { tab = state.tabId ? await chrome.tabs.get(state.tabId) : null; } catch { /* Yeni sekme oluştur. */ }
   if (!tab) tab = await chrome.tabs.create({ url: "about:blank", active: false });
@@ -202,29 +261,39 @@ async function resumeRunningSync() {
 }
 
 async function pauseSync() {
-  await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
-  await chrome.alarms.clear("futbin-sync-loop");
-  const state = await getState();
-  if (state.tabId) {
-    try { await chrome.tabs.remove(state.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+  const root = await getState();
+  const states = root.runs ? Object.values(root.runs) : [root];
+  await clearAllRunnerAlarms();
+  for (const state of states) {
+    const stopped = {
+      ...state,
+      running: false,
+      queue: [],
+      currentJobIndex: -1,
+      currentPage: 0,
+      totalPages: 0,
+      currentUrl: null,
+      tabId: null,
+      currentPlayers: {},
+      currentLatest: null,
+      newlyInsertedCoinCardIds: [],
+      nextRunAt: null,
+      status: "Durduruldu",
+      updatedAt: Date.now()
+    };
+    await setState(stopped);
+    if (state.tabId) {
+      try { await chrome.tabs.remove(state.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+    }
   }
-  const stopped = {
-    ...state,
-    running: false,
-    tabId: null,
-    nextRunAt: null,
-    status: "Durduruldu",
-    updatedAt: Date.now()
-  };
-  await setState(stopped);
-  return { ok: true, state: stopped };
+  return { ok: true, state: await getState() };
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
-  const state = await getState();
+  const state = await getStateByTabId(tabId);
   if (!state.running || tabId !== state.tabId || !matchesCurrentFutbinPage(tab.url, state)) return;
-  await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
+  await chrome.alarms.clear(pageTimeoutAlarmName(state));
   try {
     await chrome.tabs.sendMessage(tabId, {
       type: "COLLECT_SYNC_PAGE",
@@ -236,30 +305,32 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       waitMs: state.waitMs
     });
   } catch {
-    await handlePageFailure(`İçerik script'i çalışmadı: ${state.currentUrl}`);
+    await handlePageFailure(`İçerik script'i çalışmadı: ${state.currentUrl}`, state);
   }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const state = await getState();
-  if (state.running && state.tabId === tabId) await failSync("Çalışma sekmesi kapatıldı");
+  const state = await getStateByTabId(tabId);
+  if (state.running && state.tabId === tabId) await failSync("Çalışma sekmesi kapatıldı", state);
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === "futbin-sync-loop") {
-    const state = await getState();
-    if (!state.running) return;
-    await startFreshSync(state.apiBaseUrl, state.waitMs, state.operations, (state.runCount || 0) + 1);
+  const loopRunnerId = runnerIdFromAlarmName(alarm.name, SYNC_LOOP_ALARM);
+  if (loopRunnerId) {
+    const state = await getState(loopRunnerId);
+    if (!isLoopRestartDue(state)) return;
+    await startFreshSync(state.apiBaseUrl, state.waitMs, state.operations, (state.runCount || 0) + 1, loopRunnerId);
     return;
   }
-  if (alarm.name !== PAGE_TIMEOUT_ALARM) return;
-  const state = await getState();
+  const timeoutRunnerId = runnerIdFromAlarmName(alarm.name, PAGE_TIMEOUT_ALARM);
+  if (!timeoutRunnerId) return;
+  const state = await getState(timeoutRunnerId);
   if (!state.running) return;
-  await handlePageFailure(`Sayfa zaman aşımına uğradı: ${state.currentUrl}`);
+  await handlePageFailure(`Sayfa zaman aşımına uğradı: ${state.currentUrl}`, state);
 });
 
 async function handlePageResult(message, sender) {
-  const state = await getState();
+  const state = await getStateByTabId(sender.tab?.id);
   if (!isCurrentPageSender(state, message, sender)) return { ok: false, error: "Eski sayfa sonucu yok sayıldı." };
 
   const job = currentJob(state);
@@ -276,7 +347,21 @@ async function handlePageResult(message, sender) {
   if (isLatestCoinCardJob) {
     const pageLatest = message.latestCoinCards || { sourceDate: null, cards: [] };
     const existingCards = Array.isArray(currentLatest?.cards) ? currentLatest.cards : [];
-    const incomingCards = Array.isArray(pageLatest.cards) ? pageLatest.cards : [];
+    const incomingCards = (Array.isArray(pageLatest.cards) ? pageLatest.cards : []).filter((card) => {
+      try {
+        assertCompleteCoinCardPrices(card);
+        return true;
+      } catch (error) {
+        pageErrors.push(buildErrorEntry({
+          state,
+          job,
+          stage: "latest-price-validation",
+          message: error.message || String(error),
+          player: card
+        }));
+        return false;
+      }
+    });
     currentLatest = {
       sourceDate: currentLatest?.sourceDate || pageLatest.sourceDate || null,
       cards: dedupeLatestCoinCards([...existingCards, ...incomingCards])
@@ -336,23 +421,23 @@ async function handlePageResult(message, sender) {
 }
 
 async function handleCriticalPageError(message, sender) {
-  const state = await getState();
+  const state = await getStateByTabId(sender.tab?.id);
   if (!isCurrentPageSender(state, message, sender)) return { ok: false };
-  await failSync(message.error || "[CRITICAL] Futbin sayfası doğrulanamadı.");
+  await failSync(message.error || "[CRITICAL] Futbin sayfası doğrulanamadı.", state);
   return { ok: false, critical: true };
 }
 
 async function handleReportedPageFailure(message, sender) {
-  const state = await getState();
+  const state = await getStateByTabId(sender.tab?.id);
   if (!isCurrentPageSender(state, message, sender)) return { ok: false, error: "Eski sayfa hatası yok sayıldı." };
   return recordPageFailure(state, message.error || `Sayfa yüklenemedi: ${message.pageUrl}`);
 }
 
-async function handlePageFailure(error) {
-  const state = await getState();
+async function handlePageFailure(error, currentState = null) {
+  const state = currentState || await getState();
   if (!state.running) return;
   const action = await recordPageFailure(state, error);
-  if (action?.nextUrl) await performAdvance(action.nextUrl);
+  if (action?.nextUrl) await performAdvance(action.nextUrl, state.runnerId);
 }
 
 async function recordPageFailure(state, error) {
@@ -679,14 +764,14 @@ async function submitCurrentCoinCardAndPrepareNext(state) {
 }
 
 async function advanceFromContentTimer(message, sender) {
-  const state = await getState();
+  const state = await getStateByTabId(sender.tab?.id);
   if (!state.running || sender.tab?.id !== state.tabId || message.url !== state.currentUrl) return { ok: false };
-  await performAdvance(message.url);
+  await performAdvance(message.url, state.runnerId);
   return { ok: true };
 }
 
-async function performAdvance(url) {
-  const state = await getState();
+async function performAdvance(url, runnerId = null) {
+  const state = await getState(runnerId);
   if (!state.running || url !== state.currentUrl) return;
   const opening = { ...state, nextRunAt: null, status: jobStatus(currentJob(state), state.currentJobIndex, state.queue.length, "Sayfa açılıyor"), updatedAt: Date.now() };
   await setState(opening);
@@ -695,7 +780,7 @@ async function performAdvance(url) {
 
 async function navigateToCurrentPage(state) {
   await appendPageLog(state);
-  await chrome.alarms.create(PAGE_TIMEOUT_ALARM, { when: Date.now() + PAGE_TIMEOUT_MS });
+  await chrome.alarms.create(pageTimeoutAlarmName(state), { when: Date.now() + PAGE_TIMEOUT_MS });
   try {
     const tab = await chrome.tabs.get(state.tabId);
     if (matchesCurrentFutbinPage(tab.url, state)) {
@@ -704,26 +789,28 @@ async function navigateToCurrentPage(state) {
       await chrome.tabs.update(state.tabId, { url: state.currentUrl, active: false });
     }
   } catch {
-    await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
-    await failSync("Çalışma sekmesine erişilemedi");
+    await chrome.alarms.clear(pageTimeoutAlarmName(state));
+    await failSync("Çalışma sekmesine erişilemedi", state);
   }
 }
 
 async function appendPageLog(state) {
   if (!state.currentUrl) return;
-  const job = currentJob(state);
-  const stored = await chrome.storage.local.get(LOGS_KEY);
-  const logs = stored[LOGS_KEY] || [];
-  const entry = {
-    id: crypto.randomUUID(),
-    requestedAt: Date.now(),
-    url: state.currentUrl,
-    page: state.currentPage,
-    clubId: job.club_id,
-    clubName: isCoinCardOperation(job) ? job.label : job.club_name || "Kulüp",
-    leagueName: isCoinCardOperation(job) ? "Coin Cards" : job.league_name || "Lig"
-  };
-  await chrome.storage.local.set({ [LOGS_KEY]: [entry, ...logs].slice(0, MAX_LOGS) });
+  await enqueueStorageWrite(async () => {
+    const job = currentJob(state);
+    const stored = await chrome.storage.local.get(LOGS_KEY);
+    const logs = stored[LOGS_KEY] || [];
+    const entry = {
+      id: crypto.randomUUID(),
+      requestedAt: Date.now(),
+      url: state.currentUrl,
+      page: state.currentPage,
+      clubId: job.club_id,
+      clubName: isCoinCardOperation(job) ? job.label : job.club_name || "Kulüp",
+      leagueName: isCoinCardOperation(job) ? "Coin Cards" : job.league_name || "Lig"
+    };
+    await chrome.storage.local.set({ [LOGS_KEY]: [entry, ...logs].slice(0, MAX_LOGS) });
+  });
 }
 
 function normalizePageErrors(errors, job, state) {
@@ -755,14 +842,16 @@ function buildErrorEntry({ state, job, stage, message, player }) {
 async function appendErrors(entries) {
   const normalized = (Array.isArray(entries) ? entries : [entries]).filter(Boolean);
   if (!normalized.length) return;
-  const stored = await chrome.storage.local.get(ERRORS_KEY);
-  const errors = stored[ERRORS_KEY] || [];
-  await chrome.storage.local.set({ [ERRORS_KEY]: [...normalized, ...errors].slice(0, MAX_ERRORS) });
+  await enqueueStorageWrite(async () => {
+    const stored = await chrome.storage.local.get(ERRORS_KEY);
+    const errors = stored[ERRORS_KEY] || [];
+    await chrome.storage.local.set({ [ERRORS_KEY]: [...normalized, ...errors].slice(0, MAX_ERRORS) });
+  });
 }
 
-async function failSync(error) {
-  await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
-  const state = await getState();
+async function failSync(error, currentState = null) {
+  const state = currentState || await getState();
+  await chrome.alarms.clear(pageTimeoutAlarmName(state));
   await setState({
     ...state,
     running: false,
@@ -903,7 +992,7 @@ function matchesCurrentFutbinPage(value, state) {
 
 function normalizeCoinCardDetail(value, job) {
   if (!value || typeof value !== "object") throw new Error("Coin Card detay verisi okunamadı.");
-  return {
+  const card = {
     playerName: normalizeText(value.playerName) || job.label || `Coin Card #${job.id}`,
     rating: positiveNumberOrNull(value.rating),
     position: normalizeText(value.position),
@@ -917,6 +1006,23 @@ function normalizeCoinCardDetail(value, job) {
     pricePc: positiveNumberOrNull(value.pricePc),
     maxPricePc: positiveNumberOrNull(value.maxPricePc)
   };
+  assertCompleteCoinCardPrices(card);
+  return card;
+}
+
+function assertCompleteCoinCardPrices(card) {
+  const requiredPrices = [
+    ["Cross Price", card?.priceCross],
+    ["Cross Range Min", card?.minPriceCross],
+    ["Cross Range Max", card?.maxPriceCross],
+    ["PC Price", card?.pricePc],
+    ["PC Range Min", card?.minPricePc],
+    ["PC Range Max", card?.maxPricePc]
+  ];
+  const missing = requiredPrices
+    .filter(([, value]) => !Number.isFinite(Number(value)) || Number(value) <= 0)
+    .map(([label]) => label);
+  if (missing.length) throw new Error(`Eksik fiyat bilgisi nedeniyle atlandı: ${missing.join(", ")}`);
 }
 
 function positiveNumberOrNull(value) {
@@ -1174,56 +1280,201 @@ function normalizeText(value) {
 
 async function appendRecords(players, pageUrl, job, saveStatus = null) {
   if (!players.length) return;
-  const stored = await chrome.storage.local.get(RECORDS_KEY);
-  const current = stored[RECORDS_KEY] || [];
-  const incoming = players.map((player) => ({
-    id: `${job.operation || "club-players"}:${job.id || job.club_id}:${player.futbinPlayerId}`,
-    capturedAt: Date.now(),
-    pageUrl,
-    job,
-    leagueName: player.leagueName || job.league_name,
-    clubName: player.clubName || job.club_name,
-    saveStatus,
-    processedAt: saveStatus ? Date.now() : null,
-    player
-  }));
-  const merged = new Map(current.map((record) => [record.id, record]));
-  for (const record of incoming) merged.set(record.id, record);
-  await chrome.storage.local.set({ [RECORDS_KEY]: [...merged.values()].reverse().slice(0, MAX_RECORDS) });
+  await enqueueStorageWrite(async () => {
+    const stored = await chrome.storage.local.get(RECORDS_KEY);
+    const current = stored[RECORDS_KEY] || [];
+    const incoming = players.map((player) => ({
+      id: `${job.operation || "club-players"}:${job.id || job.club_id}:${player.futbinPlayerId}`,
+      capturedAt: Date.now(),
+      pageUrl,
+      job,
+      leagueName: player.leagueName || job.league_name,
+      clubName: player.clubName || job.club_name,
+      saveStatus,
+      processedAt: saveStatus ? Date.now() : null,
+      player
+    }));
+    const merged = new Map(current.map((record) => [record.id, record]));
+    for (const record of incoming) merged.set(record.id, record);
+    await chrome.storage.local.set({ [RECORDS_KEY]: [...merged.values()].reverse().slice(0, MAX_RECORDS) });
+  });
 }
 
 async function updateRecordSaveStatus(job, saveStatus) {
-  const recordId = `${job.operation}:${job.id}:`;
-  const stored = await chrome.storage.local.get(RECORDS_KEY);
-  const records = stored[RECORDS_KEY] || [];
-  const processedAt = Date.now();
-  const updated = records.map((r) => r.id.startsWith(recordId) ? { ...r, saveStatus, processedAt } : r);
-  await chrome.storage.local.set({ [RECORDS_KEY]: updated });
+  await enqueueStorageWrite(async () => {
+    const recordId = `${job.operation}:${job.id}:`;
+    const stored = await chrome.storage.local.get(RECORDS_KEY);
+    const records = stored[RECORDS_KEY] || [];
+    const processedAt = Date.now();
+    const updated = records.map((r) => r.id.startsWith(recordId) ? { ...r, saveStatus, processedAt } : r);
+    await chrome.storage.local.set({ [RECORDS_KEY]: updated });
+  });
 }
 
 async function clearCoinCardDisplayData() {
-  const stored = await chrome.storage.local.get([RECORDS_KEY, ERRORS_KEY]);
-  const records = (stored[RECORDS_KEY] || []).filter((record) =>
-    !String(record?.job?.operation || "").startsWith("coin-card"));
-  const errors = (stored[ERRORS_KEY] || []).filter((entry) =>
-    !String(entry?.job?.operation || "").startsWith("coin-card") &&
-    !String(entry?.url || "").includes("coin-card"));
-  await chrome.storage.local.set({ [RECORDS_KEY]: records, [ERRORS_KEY]: errors });
+  await enqueueStorageWrite(async () => {
+    const stored = await chrome.storage.local.get([RECORDS_KEY, ERRORS_KEY]);
+    const records = (stored[RECORDS_KEY] || []).filter((record) =>
+      !String(record?.job?.operation || "").startsWith("coin-card"));
+    const errors = (stored[ERRORS_KEY] || []).filter((entry) =>
+      !String(entry?.job?.operation || "").startsWith("coin-card") &&
+      !String(entry?.url || "").includes("coin-card"));
+    await chrome.storage.local.set({ [RECORDS_KEY]: records, [ERRORS_KEY]: errors });
+  });
 }
 
-async function getState() {
+async function getState(runnerId = null) {
   const stored = await chrome.storage.local.get(STATE_KEY);
-  return { ...emptyState, ...(stored[STATE_KEY] || {}) };
+  const root = normalizeRootState(stored[STATE_KEY]);
+  if (runnerId) return root.runs?.[runnerId] || emptyRunnerState(runnerId, root);
+  return aggregateRootState(root);
+}
+
+function normalizeOperations(rawOperations) {
+  return [...new Set(Array.isArray(rawOperations) ? rawOperations : ["club-players"])]
+    .filter((operation) => operation === "club-players" || operation === "coin-cards");
+}
+
+function operationRunnerId(operation) {
+  return RUNNER_IDS.find((runnerId) => RUNNER_OPERATIONS[runnerId].includes(operation)) || null;
+}
+
+function emptyRunnerState(runnerId, root = {}) {
+  const operations = RUNNER_OPERATIONS[runnerId] || [];
+  return {
+    ...emptyState,
+    runnerId,
+    apiBaseUrl: root.apiBaseUrl || emptyState.apiBaseUrl,
+    waitMs: root.waitMs || emptyState.waitMs,
+    operations,
+    status: "Hazır"
+  };
+}
+
+function normalizeRootState(value = {}) {
+  const root = { ...emptyState, ...(value || {}) };
+  const legacyRun = value?.runnerId || (Array.isArray(value?.operations) && value.operations.length === 1
+    ? operationRunnerId(value.operations[0])
+    : null);
+  const runs = {};
+  for (const runnerId of RUNNER_IDS) {
+    runs[runnerId] = {
+      ...emptyRunnerState(runnerId, root),
+      ...(value?.runs?.[runnerId] || {})
+    };
+  }
+  if (legacyRun && !value?.runs?.[legacyRun]) {
+    runs[legacyRun] = { ...emptyRunnerState(legacyRun, root), ...value, runnerId: legacyRun };
+  }
+  return { ...root, runs };
+}
+
+function aggregateRootState(root) {
+  const runs = RUNNER_IDS.reduce((all, runnerId) => ({
+    ...all,
+    [runnerId]: { ...emptyRunnerState(runnerId, root), ...(root.runs?.[runnerId] || {}) }
+  }), {});
+  const activeRun = RUNNER_IDS.map((runnerId) => runs[runnerId]).find((run) => run.running && !run.nextRunAt) ||
+    RUNNER_IDS.map((runnerId) => runs[runnerId]).find((run) => run.running) ||
+    RUNNER_IDS.map((runnerId) => runs[runnerId]).find((run) => run.updatedAt) ||
+    runs["club-players"];
+  const queue = RUNNER_IDS.flatMap((runnerId) => runs[runnerId].queue || []);
+  const operations = RUNNER_IDS.flatMap((runnerId) => runs[runnerId].operations || []);
+  const clubSaveResults = RUNNER_IDS.reduce((results, runnerId) => ({
+    ...results,
+    ...(runs[runnerId].clubSaveResults || {})
+  }), {});
+  return {
+    ...emptyState,
+    ...activeRun,
+    runs,
+    running: RUNNER_IDS.some((runnerId) => runs[runnerId].running),
+    queue,
+    operations: [...new Set(operations)],
+    clubSaveResults,
+    savedPlayers: RUNNER_IDS.reduce((total, runnerId) => total + (Number(runs[runnerId].savedPlayers) || 0), 0),
+    skippedPlayers: RUNNER_IDS.reduce((total, runnerId) => total + (Number(runs[runnerId].skippedPlayers) || 0), 0),
+    apiBaseUrl: root.apiBaseUrl || activeRun?.apiBaseUrl || emptyState.apiBaseUrl,
+    waitMs: root.waitMs || activeRun?.waitMs || emptyState.waitMs,
+    updatedAt: Date.now()
+  };
+}
+
+async function getStateByTabId(tabId) {
+  const root = await getState();
+  return Object.values(root.runs || {}).find((run) => run?.tabId === tabId) || emptyState;
+}
+
+function alarmRunnerId(stateOrRunnerId) {
+  return typeof stateOrRunnerId === "string" ? stateOrRunnerId : stateOrRunnerId?.runnerId || "legacy";
+}
+
+function pageTimeoutAlarmName(stateOrRunnerId) {
+  return `${PAGE_TIMEOUT_ALARM}:${alarmRunnerId(stateOrRunnerId)}`;
+}
+
+function syncLoopAlarmName(stateOrRunnerId) {
+  return `${SYNC_LOOP_ALARM}:${alarmRunnerId(stateOrRunnerId)}`;
+}
+
+function runnerIdFromAlarmName(name, prefix) {
+  const marker = `${prefix}:`;
+  return String(name || "").startsWith(marker) ? String(name).slice(marker.length) : null;
+}
+
+async function clearAllRunnerAlarms() {
+  await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
+  await chrome.alarms.clear(SYNC_LOOP_ALARM);
+  await Promise.all(RUNNER_IDS.flatMap((runnerId) => [
+    chrome.alarms.clear(pageTimeoutAlarmName(runnerId)),
+    chrome.alarms.clear(syncLoopAlarmName(runnerId))
+  ]));
+}
+
+function isLoopRestartDue(state) {
+  return Boolean(state?.running && state?.nextRunAt && state.nextRunAt <= Date.now());
 }
 
 async function setState(state) {
-  await chrome.storage.local.set({ [STATE_KEY]: state });
-  chrome.runtime.sendMessage({ type: "STATE_CHANGED", state }).catch(() => {});
+  return enqueueStateWrite(async () => {
+    const stored = await chrome.storage.local.get(STATE_KEY);
+    let root = normalizeRootState(stored[STATE_KEY]);
+    if (state?.runnerId) {
+      root = {
+        ...root,
+        apiBaseUrl: state.apiBaseUrl || root.apiBaseUrl || emptyState.apiBaseUrl,
+        waitMs: state.waitMs || root.waitMs || emptyState.waitMs,
+        runs: {
+          ...(root.runs || {}),
+          [state.runnerId]: { ...emptyRunnerState(state.runnerId, root), ...state }
+        },
+        updatedAt: Date.now()
+      };
+    } else {
+      root = normalizeRootState(state);
+    }
+    const aggregate = aggregateRootState(root);
+    await chrome.storage.local.set({ [STATE_KEY]: aggregate });
+    chrome.runtime.sendMessage({ type: "STATE_CHANGED", state: aggregate }).catch(() => {});
+  });
+}
+
+function enqueueStateWrite(task) {
+  const next = stateWriteQueue.then(task, task);
+  stateWriteQueue = next.catch(() => {});
+  return next;
+}
+
+function enqueueStorageWrite(task) {
+  const next = storageWriteQueue.then(task, task);
+  storageWriteQueue = next.catch(() => {});
+  return next;
 }
 
 async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults, queue) {
-  const isClubPlayersActive = state.operations.includes("club-players");
-  const waitMs = isClubPlayersActive ? 2 * 60 * 60 * 1000 : 60 * 60 * 1000;
+  const isCoinCardsActive = state.operations.includes("coin-cards");
+  const loopMinutes = isCoinCardsActive ? COIN_CARDS_SYNC_LOOP_MINUTES : CLUB_PLAYERS_SYNC_LOOP_MINUTES;
+  const waitMs = loopMinutes * 60 * 1000;
   const loopNumber = (state.runCount || 0) + 1;
   const targetTime = Date.now() + waitMs;
 
@@ -1240,7 +1491,7 @@ async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults
     updatedAt: Date.now()
   };
   await setState(waiting);
-  await chrome.alarms.create("futbin-sync-loop", { when: targetTime });
+  await chrome.alarms.create(syncLoopAlarmName(state), { when: targetTime });
 
   return { ok: true, action: "WAIT_AND_ADVANCE", waitMs };
 }

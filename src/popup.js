@@ -2,10 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 const LOCAL_API_BASE_URL = "http://localhost:5055/api/";
 const elements = {
   apiEnvironmentButtons: [...document.querySelectorAll(".environment-button")],
-  operationButtons: [...document.querySelectorAll(".operation-tab")],
   waitMs: $("#waitMs"),
   start: $("#start"),
-  resume: $("#resume"),
   stop: $("#stop"),
   clear: $("#clear"),
   status: $("#status"),
@@ -34,30 +32,27 @@ let currentState = {};
 let currentRecords = [];
 let currentLogs = [];
 let currentErrors = [];
-let currentListTab = "club-players";
+let currentContentTab = "web-app-sync";
+let currentListTab = "web-app-sync";
 let selectedApiBaseUrl = LOCAL_API_BASE_URL;
 const collapsedCoinSections = new Set();
 init();
 setInterval(renderCountdown, 250);
 
 async function init() {
-  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncOperations", "syncListTab", "syncContentTab"]);
+  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncListTab", "syncContentTab"]);
   setApiEnvironment(settings.syncApiBaseUrl || LOCAL_API_BASE_URL);
-  setOperationSelection(Array.isArray(settings.syncOperations) ? settings.syncOperations : ["club-players"]);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
-  if (settings.syncListTab) setListTab(settings.syncListTab);
-  setContentTab(settings.syncContentTab || "web-app-sync");
+  setContentTab(settings.syncContentTab || contentNameForList(settings.syncListTab) || "web-app-sync");
   const snapshot = await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" });
   render(snapshot.syncState || {}, snapshot.playerRecords || [], snapshot.syncLogs || [], snapshot.syncErrors || []);
 }
 
 elements.start.addEventListener("click", async () => {
   showError();
-  const operations = elements.operationButtons
-    .filter((button) => button.classList.contains("active"))
-    .map((button) => button.dataset.operation);
+  const operations = allSyncOperations();
   if (!operations.length) {
-    showError("En az bir işlem seçmelisin.");
+    showError("Bu sekmeye bağlı senkronizasyon işlemi bulunamadı.");
     return;
   }
   if (currentState.queue?.length && !currentState.running && currentState.currentJobIndex >= 0) {
@@ -79,12 +74,6 @@ elements.start.addEventListener("click", async () => {
   }
 });
 
-elements.resume.addEventListener("click", async () => {
-  showError();
-  const response = await chrome.runtime.sendMessage({ type: "RESUME_SYNC" });
-  if (!response?.ok) showError(response?.error || "Tarama devam ettirilemedi.");
-});
-
 elements.stop.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "STOP_SYNC" });
   elements.start.style.display = "";
@@ -104,47 +93,42 @@ elements.apiEnvironmentButtons.forEach((button) => {
 });
 elements.waitMs.addEventListener("change", saveSettings);
 
-elements.operationButtons.forEach((button) => {
-  button.addEventListener("click", async () => {
-    const isActive = button.classList.toggle("active");
-    button.setAttribute("aria-pressed", String(isActive));
-    await saveOperationSelection();
-  });
-});
-
 elements.contentTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     setContentTab(tab.dataset.content);
     chrome.storage.local.set({
+      syncOperations: selectedOperations(),
       syncContentTab: tab.dataset.content,
       syncListTab: currentListTab
     });
-    renderRecords(currentRecords, currentErrors, currentState);
+    render(currentState, currentRecords, currentLogs, currentErrors);
   });
 });
 
-function setListTab(listName) {
-  currentListTab = listName || "club-players";
+function setListTab(listName, title) {
+  currentListTab = listName || "web-app-sync";
   if (elements.listTitle) {
-    elements.listTitle.textContent = currentListTab === "coin-cards"
+    elements.listTitle.textContent = title || (currentListTab === "coin-cards"
       ? "Futbin Latest Coin Cards"
-      : "Futbin All Players";
+      : currentListTab === "club-players"
+        ? "Futbin All Players"
+        : "Web App Sync");
   }
 }
 
 function setContentTab(contentName) {
-  const selectedContent = contentName || "web-app-sync";
-  const selectedTab = elements.contentTabs.find((tab) => tab.dataset.content === selectedContent);
-  if (selectedTab?.dataset.list) setListTab(selectedTab.dataset.list);
+  const selectedTab = elements.contentTabs.find((tab) => tab.dataset.content === contentName) ||
+    elements.contentTabs.find((tab) => tab.dataset.content === "web-app-sync") ||
+    elements.contentTabs[0];
+  const selectedContent = selectedTab?.dataset.content || "web-app-sync";
+  currentContentTab = selectedContent;
+  setListTab(selectedTab?.dataset.list || "web-app-sync", selectedTab?.textContent?.trim());
 
   elements.contentTabs.forEach((tab) => {
     const isSelected = tab.dataset.content === selectedContent;
     tab.classList.toggle("view-active", isSelected);
     tab.setAttribute("aria-selected", String(isSelected));
   });
-  if (elements.listTitle && selectedContent === "web-app-sync") {
-    elements.listTitle.textContent = "Web App Sync";
-  }
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -196,27 +180,34 @@ async function saveSettings() {
   await chrome.storage.local.set({
     syncApiBaseUrl: selectedApiBaseUrl,
     syncWaitMs: Number(elements.waitMs.value),
-    syncOperations: selectedOperations()
+    syncOperations: selectedOperations(),
+    syncContentTab: currentContentTab,
+    syncListTab: currentListTab
   });
-}
-
-async function saveOperationSelection() {
-  await chrome.storage.local.set({ syncOperations: selectedOperations() });
 }
 
 function selectedOperations() {
-  return elements.operationButtons
-    .filter((button) => button.classList.contains("active"))
-    .map((button) => button.dataset.operation);
+  return (selectedContentTab()?.dataset.operations || "")
+    .split(",")
+    .map((operation) => operation.trim())
+    .filter(Boolean);
 }
 
-function setOperationSelection(operations) {
-  const selected = new Set(operations);
-  elements.operationButtons.forEach((button) => {
-    const isActive = selected.has(button.dataset.operation);
-    button.classList.toggle("active", isActive);
-    button.setAttribute("aria-pressed", String(isActive));
-  });
+function allSyncOperations() {
+  return [...new Set(elements.contentTabs.flatMap((tab) =>
+    (tab.dataset.operations || "")
+      .split(",")
+      .map((operation) => operation.trim())
+      .filter(Boolean)
+  ))];
+}
+
+function selectedContentTab() {
+  return elements.contentTabs.find((tab) => tab.dataset.content === currentContentTab);
+}
+
+function contentNameForList(listName) {
+  return elements.contentTabs.find((tab) => tab.dataset.list === listName)?.dataset.content;
 }
 
 function setApiEnvironment(apiBaseUrl) {
@@ -229,27 +220,48 @@ function setApiEnvironment(apiBaseUrl) {
 }
 
 function render(state = {}, records = [], logs = [], errors = []) {
-  currentState = state;
+  const viewState = stateForCurrentView(state);
+  const nonSkippedErrors = errors.filter((entry) => !isSkippedErrorEntry(entry));
+  const displayLogs = logs.filter(entryMatchesCurrentView);
+  const displayErrors = nonSkippedErrors.filter(entryMatchesCurrentView);
+  currentState = viewState;
   currentRecords = records;
   currentLogs = logs;
-  currentErrors = errors;
-  const totalClubs = state.queue?.length || 0;
-  const currentClubNumber = state.currentJobIndex >= 0 ? state.currentJobIndex + 1 : 0;
-  const currentJob = state.queue?.[state.currentJobIndex];
-  const currentPlayers = Object.keys(state.currentPlayers || {}).length;
+  currentErrors = nonSkippedErrors;
+  const visibleQueue = queueForCurrentView(viewState.queue || []);
+  const currentJob = viewState.queue?.[viewState.currentJobIndex];
+  const activeJob = jobMatchesCurrentView(currentJob) ? currentJob : null;
+  const completedVisibleJobs = visibleQueue
+    .filter((job) => (viewState.queue || []).indexOf(job) < viewState.currentJobIndex)
+    .length;
+  const currentJobNumber = activeJob
+    ? visibleQueue.findIndex((job) => job === activeJob) + 1
+    : Math.min(completedVisibleJobs, visibleQueue.length);
+  const totalJobs = visibleQueue.length;
+  const currentPlayers = activeJob
+    ? activeJob.operation === "coin-card-latest"
+      ? viewState.currentLatest?.cards?.length || 0
+      : Object.keys(viewState.currentPlayers || {}).length
+    : 0;
 
-  elements.status.textContent = state.status || "Hazır";
-  elements.dot.classList.toggle("running", Boolean(state.running));
-  elements.progress.style.width = totalClubs ? `${Math.min(100, currentClubNumber / totalClubs * 100)}%` : "0%";
-  elements.clubCount.textContent = `${Math.min(currentClubNumber, totalClubs)} / ${totalClubs}`;
-  elements.pageCount.textContent = `${state.currentPage || 0} / ${state.totalPages || 0}`;
+  elements.status.textContent = !hasSyncContentView()
+    ? "İçerik henüz hazır değil"
+    : activeJob
+      ? viewState.status || "Hazır"
+      : viewState.running && totalJobs
+        ? currentJobNumber >= totalJobs
+          ? "Bu sekmedeki işler tamamlandı"
+          : "Bu sekmedeki işler sırada bekliyor"
+        : "Hazır";
+  elements.dot.classList.toggle("running", Boolean(viewState.running && hasSyncContentView()));
+  elements.progress.style.width = totalJobs ? `${Math.min(100, currentJobNumber / totalJobs * 100)}%` : "0%";
+  elements.clubCount.textContent = `${Math.min(currentJobNumber, totalJobs)} / ${totalJobs}`;
+  elements.pageCount.textContent = activeJob ? `${viewState.currentPage || 0} / ${viewState.totalPages || 0}` : "0 / 0";
   elements.recordCount.textContent = currentPlayers;
-  if (elements.runCount) elements.runCount.textContent = state.runCount || 0;
-  const isCoinCardsJob = currentJob?.operation === "coin-cards" || currentJob?.operation === "coin-card-latest";
+  if (elements.runCount) elements.runCount.textContent = viewState.runCount || 0;
 
-  const saveTotals = Object.entries(state.clubSaveResults || {}).reduce((totals, [key, result]) => {
-    const isResultForCoinCards = String(key).startsWith("coin-card:");
-    if (isCoinCardsJob ? !isResultForCoinCards : isResultForCoinCards) return totals;
+  const saveTotals = Object.entries(viewState.clubSaveResults || {}).reduce((totals, [key, result]) => {
+    if (!saveResultMatchesCurrentView(key)) return totals;
 
     return {
       inserted: totals.inserted + (Number(result?.inserted) || 0),
@@ -258,18 +270,26 @@ function render(state = {}, records = [], logs = [], errors = []) {
     };
   }, { inserted: 0, updated: 0, deleted: 0 });
   if (elements.clubCount.nextElementSibling) {
-    elements.clubCount.nextElementSibling.textContent = isCoinCardsJob ? "Cards" : "Club";
+    elements.clubCount.nextElementSibling.textContent = currentListTab === "coin-cards"
+      ? "Cards"
+      : currentListTab === "club-players"
+        ? "Club"
+        : "Content";
   }
 
   elements.insertedCount.textContent = saveTotals.inserted;
   elements.updatedCount.textContent = saveTotals.updated;
   elements.deletedCount.textContent = saveTotals.deleted;
-  elements.skippedCount.textContent = state.skippedPlayers || 0;
-  elements.currentClub.textContent = currentJob
-    ? currentJob.operation === "coin-cards" || currentJob.operation === "coin-card-latest"
-      ? currentJob.label || "Coin Cards"
-      : `${currentJob.league_name} / ${currentJob.club_name}`
-    : "İş bekleniyor";
+  elements.skippedCount.textContent = skippedCountForCurrentView(viewState, activeJob);
+  elements.currentClub.textContent = activeJob
+    ? isCoinCardJob(activeJob)
+      ? activeJob.label || "Coin Cards"
+      : `${activeJob.league_name} / ${activeJob.club_name}`
+    : viewState.running && totalJobs
+      ? currentJobNumber >= totalJobs
+        ? "Bu sekme tamamlandı"
+        : "Sırada bekliyor"
+      : "İş bekleniyor";
   if (state.running) {
     elements.start.style.display = "none";
     elements.stop.style.display = "";
@@ -278,16 +298,70 @@ function render(state = {}, records = [], logs = [], errors = []) {
     elements.start.style.display = "";
     elements.stop.style.display = "none";
   }
-  elements.start.disabled = Boolean(state.running);
-  elements.resume.disabled = Boolean(state.running) || !canResume(state);
+  elements.start.disabled = Boolean(state.running) || !allSyncOperations().length;
   elements.stop.disabled = !state.running;
   elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(state.running); });
-  elements.operationButtons.forEach((button) => { button.disabled = Boolean(state.running); });
   elements.waitMs.disabled = Boolean(state.running);
-  showError(state.error || "");
+  showError(viewState.error || "");
   renderCountdown();
-  renderRecords(records, errors, state);
-  renderLogs(logs, errors);
+  renderRecords(records, displayErrors, viewState);
+  renderLogs(displayLogs, displayErrors);
+}
+
+function isSkippedErrorEntry(entry) {
+  const message = String(entry?.message || "").toLocaleLowerCase("tr-TR");
+  return message.includes("atlandı") || message.includes("atlandi");
+}
+
+function stateForCurrentView(state = {}) {
+  if (currentListTab === "coin-cards") return state.runs?.["coin-cards"] || state;
+  if (currentListTab === "club-players") return state.runs?.["club-players"] || state;
+  return state;
+}
+
+function isCoinCardJob(job) {
+  return String(job?.operation || "").startsWith("coin-card");
+}
+
+function isCoinCardEntry(entry) {
+  return Boolean(
+    isCoinCardJob(entry?.job) ||
+    String(entry?.url || "").includes("coin-card") ||
+    String(entry?.leagueName || "").toLocaleLowerCase("tr-TR") === "coin cards"
+  );
+}
+
+function hasSyncContentView() {
+  return currentListTab === "coin-cards" || currentListTab === "club-players";
+}
+
+function jobMatchesCurrentView(job) {
+  if (!job || !hasSyncContentView()) return false;
+  const isCoinCard = isCoinCardJob(job);
+  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
+}
+
+function entryMatchesCurrentView(entry) {
+  if (!hasSyncContentView()) return false;
+  const isCoinCard = isCoinCardEntry(entry);
+  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
+}
+
+function queueForCurrentView(queue) {
+  return (queue || []).filter(jobMatchesCurrentView);
+}
+
+function saveResultMatchesCurrentView(key) {
+  if (!hasSyncContentView()) return false;
+  const isCoinCard = String(key).startsWith("coin-card:");
+  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
+}
+
+function skippedCountForCurrentView(state, activeJob) {
+  const savedSkipped = Object.entries(state.clubSaveResults || {})
+    .filter(([key]) => saveResultMatchesCurrentView(key))
+    .reduce((total, [, result]) => total + (Number(result?.skipped) || 0), 0);
+  return savedSkipped + (activeJob ? Number(state.currentSkipped) || 0 : 0);
 }
 
 function canResume(state) {
@@ -295,6 +369,10 @@ function canResume(state) {
 }
 
 function renderCountdown() {
+  if (!hasSyncContentView()) {
+    elements.countdown.textContent = "İçerik yok";
+    return;
+  }
   if (!currentState.running) {
     elements.countdown.textContent = canResume(currentState) ? "Devam etmeye hazır" : "Bekliyor";
     return;
@@ -323,53 +401,55 @@ function renderCountdown() {
 }
 
 function renderRecords(records, errors = [], state = {}) {
-  const isCoinCardsTab = currentListTab === "coin-cards";
-
-  const filteredRecords = records.filter((r) => {
-    const isCoinCardJob = r.job?.operation?.startsWith("coin-card");
-    return isCoinCardsTab ? isCoinCardJob : !isCoinCardJob;
-  });
-
-  const filteredErrors = errors.filter((e) => {
-    const isCoinCardJob = e.job?.operation?.startsWith("coin-card") || e.url?.includes("coin-card");
-    return isCoinCardsTab ? isCoinCardJob : !isCoinCardJob;
-  });
-
-  if (!filteredRecords.length && !filteredErrors.length && !isCoinCardsTab) {
-    elements.records.innerHTML = '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
+  if (!hasSyncContentView()) {
+    elements.records.innerHTML = '<div class="empty">Web App Sync içeriği henüz hazır değil.</div>';
     return;
   }
 
-  const firstJob = filteredRecords[0]?.job || filteredErrors[0]?.job;
-  const isCoinCards = firstJob?.operation?.startsWith("coin-card");
+  const coinRecords = records.filter(isCoinCardEntry);
+  const clubRecords = records.filter((record) => !isCoinCardEntry(record));
+  const coinErrors = errors.filter(isCoinCardEntry);
+  const clubErrors = errors.filter((entry) => !isCoinCardEntry(entry));
 
-  if (isCoinCards || isCoinCardsTab) {
-    const inserted = filteredRecords.filter((r) => r.saveStatus === "inserted");
-    const updated = filteredRecords.filter((r) => r.saveStatus !== "inserted");
-
-    const makeSection = (sectionName, label, records, errors = [], extraClass = "") => {
-      const countText = `${records.length} kart`;
-      const isCollapsed = collapsedCoinSections.has(sectionName);
-      const rows = records.length || errors.length
-        ? `${records.length ? renderCoinCardHeader() : ""}${errors.map(renderErrorRecord).join("")}${records.map(renderCoinCardRecord).join("")}`
-        : '<div class="coin-section-empty">Henüz kayıt yok.</div>';
-      return `<div class="sync-player-group coin-cards-group ${extraClass}${isCollapsed ? " collapsed" : ""}">
-        <div class="league-group sync-group-header coin-section-header">
-          <button class="group-toggle coin-section-toggle" type="button" data-section="${escapeHtml(sectionName)}" aria-expanded="${String(!isCollapsed)}">
-            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
-            <span class="sync-group-entity"><strong>${escapeHtml(label)}</strong></span>
-            <span class="group-count">${escapeHtml(countText)}</span>
-          </button>
-        </div>
-        <div class="coin-section-body">${rows}</div>
-      </div>`;
-    };
-
-    elements.records.innerHTML =
-      makeSection("inserted", "Yeni Kartlar", inserted, [], "section-inserted") +
-      makeSection("updated", "Güncellenen Kartlar", updated, filteredErrors.slice(0, 300), "section-updated");
+  if (currentListTab === "coin-cards") {
+    elements.records.innerHTML = renderCoinCardSections(coinRecords, coinErrors, true);
     return;
   }
+
+  elements.records.innerHTML = renderClubPlayerGroups(clubRecords, clubErrors, state) ||
+    '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
+}
+
+function renderCoinCardSections(records, errors = [], showEmpty = true) {
+  if (!showEmpty && !records.length && !errors.length) return "";
+
+  const inserted = records.filter((r) => r.saveStatus === "inserted");
+  const updated = records.filter((r) => r.saveStatus !== "inserted");
+
+  const makeSection = (sectionName, label, records, errors = [], extraClass = "") => {
+    const countText = `${records.length} kart`;
+    const isCollapsed = collapsedCoinSections.has(sectionName);
+    const rows = records.length || errors.length
+      ? `${records.length ? renderCoinCardHeader() : ""}${errors.map(renderErrorRecord).join("")}${records.map(renderCoinCardRecord).join("")}`
+      : '<div class="coin-section-empty">Henüz kayıt yok.</div>';
+    return `<div class="sync-player-group coin-cards-group ${extraClass}${isCollapsed ? " collapsed" : ""}">
+      <div class="league-group sync-group-header coin-section-header">
+        <button class="group-toggle coin-section-toggle" type="button" data-section="${escapeHtml(sectionName)}" aria-expanded="${String(!isCollapsed)}">
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+          <span class="sync-group-entity"><strong>${escapeHtml(label)}</strong></span>
+          <span class="group-count">${escapeHtml(countText)}</span>
+        </button>
+      </div>
+      <div class="coin-section-body">${rows}</div>
+    </div>`;
+  };
+
+  return makeSection("inserted", "Yeni Kartlar", inserted, [], "section-inserted") +
+    makeSection("updated", "Güncellenen Kartlar", updated, errors.slice(0, 300), "section-updated");
+}
+
+function renderClubPlayerGroups(records, errors = [], state = {}) {
+  if (!records.length && !errors.length) return "";
 
   const groups = new Map();
   const ensureGroup = (leagueName, clubName, clubId) => {
@@ -380,18 +460,18 @@ function renderRecords(records, errors = [], state = {}) {
     return groups.get(key);
   };
 
-  filteredRecords.slice(0, 500).forEach((record) => {
+  records.slice(0, 500).forEach((record) => {
     ensureGroup(
       record?.leagueName || record?.job?.league_name,
       record?.clubName || record?.job?.club_name,
       record?.job?.club_id || record?.clubId
     ).normal.push(record);
   });
-  filteredErrors.slice(0, 300).forEach((entry) => {
+  errors.slice(0, 300).forEach((entry) => {
     ensureGroup(entry?.leagueName, entry?.clubName, entry?.clubId).errors.push(entry);
   });
 
-  elements.records.innerHTML = [...groups.values()]
+  return [...groups.values()]
     .sort((left, right) => left.league.localeCompare(right.league, "tr") || left.club.localeCompare(right.club, "tr"))
     .map((group) => {
       const saveResult = group.clubId != null ? state.clubSaveResults?.[String(group.clubId)] : null;
@@ -424,6 +504,8 @@ function renderCoinCardHeader() {
 
 function renderCoinCardRecord(record) {
   const player = record.player || {};
+  const fullPlayerName = String(player.name || "—");
+  const shortPlayerName = Array.from(fullPlayerName).slice(0, 15).join("");
   const futbinUrl = safeFutbinUrl(player.futbinPlayerLink);
   const playerImg = player.urlImgPlayer
     ? `<img class="cc-player-img" src="${escapeHtml(player.urlImgPlayer)}" alt="" loading="lazy">`
@@ -436,8 +518,8 @@ function renderCoinCardRecord(record) {
   const nation = player.urlImgNation
     ? `<img class="cc-nation-img" src="${escapeHtml(player.urlImgNation)}" alt="" loading="lazy">`
     : "";
-  const playerDetails = `<div class="grid-cell cc-player-details" title="${escapeHtml(player.name || "—")}">
-    <strong>${escapeHtml(player.name || "—")}</strong>
+  const playerDetails = `<div class="grid-cell cc-player-details" title="${escapeHtml(fullPlayerName)}">
+    <strong>${escapeHtml(shortPlayerName)}</strong>
     <span class="cc-player-meta"><b>${escapeHtml(player.rating ?? "—")}</b>${nation}</span>
   </div>`;
   return `<article class="player-data-row sync-row coin-card-row${futbinUrl ? " is-clickable" : ""}"${syncRowLinkAttributes(futbinUrl)} title="${escapeHtml(player.name || "")}">
@@ -445,7 +527,7 @@ function renderCoinCardRecord(record) {
       ${playerDetails}
       ${priceCell(player.priceConsole)}
       ${priceCell(player.pricePc)}
-      ${cell(formatProcessedDate(record.processedAt), "processed-date-cell")}
+      ${processedDateCell(record.processedAt)}
     </article>`;
 }
 
@@ -564,21 +646,38 @@ function priceCell(value) {
 
 function formatPrice(value) {
   if (value === null || value === undefined || value === "") return "—";
-  return Number.isFinite(Number(value)) ? new Intl.NumberFormat("tr-TR").format(Number(value)) : "—";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+
+  const roundedThousands = Math.round(number / 1_000);
+  if (roundedThousands >= 1_000) {
+    const millions = Math.floor(roundedThousands / 1_000);
+    const thousands = roundedThousands % 1_000;
+    return thousands ? `${millions}M ${thousands}K` : `${millions}M`;
+  }
+  if (roundedThousands >= 1) return `${roundedThousands}K`;
+  return new Intl.NumberFormat("tr-TR").format(number);
 }
 
-function formatProcessedDate(value) {
+function processedDateCell(value) {
   const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("tr-TR", {
+  if (!value || Number.isNaN(date.getTime())) {
+    return '<div class="grid-cell processed-date-cell"><span>—</span></div>';
+  }
+  const dateText = new Intl.DateTimeFormat("tr-TR", {
     day: "2-digit",
     month: "2-digit",
-    year: "numeric",
+    year: "numeric"
+  }).format(date);
+  const timeText = new Intl.DateTimeFormat("tr-TR", {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
     hour12: false
-  }).format(date).replace(",", "");
+  }).format(date);
+  return `<div class="grid-cell processed-date-cell" title="${escapeHtml(`${dateText} ${timeText}`)}">
+    <span>${escapeHtml(dateText)}</span><b>${escapeHtml(timeText)}</b>
+  </div>`;
 }
 
 function coinIcon() {

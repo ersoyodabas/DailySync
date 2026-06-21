@@ -111,7 +111,7 @@ function parseLatestCoinCardRow(row) {
   const crossRange = parseLatestPriceRange(row.querySelector(".table-cross-range")?.textContent);
   const pcRange = parseLatestPriceRange(row.querySelector(".table-pc-range.platform-pc-text")?.textContent);
 
-  return {
+  const card = {
     playerName: normalize(nameLink.textContent),
     url: new URL(href, "https://www.futbin.com").href,
     playerImgUrl: imageUrl(images[1]),
@@ -126,6 +126,23 @@ function parseLatestCoinCardRow(row) {
     pricePc: priceFromNode(row.querySelector(".table-pc-price.platform-pc-text")) || null,
     maxPricePc: pcRange?.max ?? null
   };
+  assertCompleteCoinCardPrices(card);
+  return card;
+}
+
+function assertCompleteCoinCardPrices(card) {
+  const requiredPrices = [
+    ["Cross Price", card?.priceCross],
+    ["Cross Range Min", card?.minPriceCross],
+    ["Cross Range Max", card?.maxPriceCross],
+    ["PC Price", card?.pricePc],
+    ["PC Range Min", card?.minPricePc],
+    ["PC Range Max", card?.maxPricePc]
+  ];
+  const missing = requiredPrices
+    .filter(([, value]) => !Number.isFinite(Number(value)) || Number(value) <= 0)
+    .map(([label]) => label);
+  if (missing.length) throw new Error(`Eksik fiyat bilgisi nedeniyle atlandı: ${missing.join(", ")}`);
 }
 
 function parseLatestPriceRange(value) {
@@ -170,10 +187,10 @@ function parseCoinCardDetail() {
     bgCardUrl,
     nationImgUrl,
     minPriceCross: crossRange?.min ?? null,
-    priceCross: crossPrice || crossRange?.min || null,
+    priceCross: crossPrice || null,
     maxPriceCross: crossRange?.max ?? null,
     minPricePc: pcRange?.min ?? null,
-    pricePc: pcPrice || pcRange?.min || null,
+    pricePc: pcPrice || null,
     maxPricePc: pcRange?.max ?? null
   };
 }
