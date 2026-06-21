@@ -7,6 +7,8 @@ const PAGE_TIMEOUT_MS = 60000;
 const MAX_RECORDS = 500;
 const MAX_LOGS = 300;
 const MAX_ERRORS = 300;
+const FUTBIN_LATEST_URL = "https://www.futbin.com/latest";
+const LATEST_COIN_CARD_PAGES = 2;
 const SPECIAL_QUALITY_IMAGE_URL = "https://cdn3.futbin.com/content/fifa26/img/cards/tiny/3_gold.png?fm=png&ixlib=java-2.1.0&verzion=1&w=128&s=d72e95665680dee8e3818602d714323a";
 
 const emptyState = {
@@ -21,11 +23,13 @@ const emptyState = {
   waitMs: 5000,
   lookups: null,
   currentPlayers: {},
+  currentLatest: null,
   currentSkipped: 0,
   pagesAttempted: 0,
   pagesSucceeded: 0,
   failedPages: [],
   completedClubs: 0,
+  operations: ["club-players"],
   savedPlayers: 0,
   skippedPlayers: 0,
   clubSaveResults: {},
@@ -58,7 +62,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_SYNC":
-      return startFreshSync(message.apiBaseUrl, message.waitMs);
+      return startFreshSync(message.apiBaseUrl, message.waitMs, message.operations);
     case "RESUME_SYNC":
       return resumePausedSync();
     case "STOP_SYNC":
@@ -89,13 +93,30 @@ async function handleMessage(message, sender) {
   }
 }
 
-async function startFreshSync(rawApiBaseUrl, rawWaitMs) {
+async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
   const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl);
   const waitMs = Math.min(30000, Math.max(3000, Number(rawWaitMs) || 5000));
-  const response = await apiRequest(apiBaseUrl, "sync/futbin-player-jobs");
-  const queue = Array.isArray(response?.data?.jobs) ? response.data.jobs : [];
-  const lookups = response?.data?.lookups || null;
-  validateLookups(lookups);
+  const operations = [...new Set(Array.isArray(rawOperations) ? rawOperations : ["club-players"])]
+    .filter((operation) => operation === "club-players" || operation === "coin-cards");
+  if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
+
+  const queue = [];
+  let lookups = null;
+  if (operations.includes("coin-cards")) {
+    queue.push({
+      id: "latest",
+      label: "Latest Coin Cards",
+      url: FUTBIN_LATEST_URL,
+      operation: "coin-card-latest"
+    });
+  }
+  if (operations.includes("club-players")) {
+    const response = await apiRequest(apiBaseUrl, "sync/futbin-player-jobs");
+    const jobs = Array.isArray(response?.data?.jobs) ? response.data.jobs : [];
+    lookups = response?.data?.lookups || null;
+    validateLookups(lookups);
+    queue.push(...jobs.map((job) => ({ ...job, operation: "club-players" })));
+  }
   await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
 
   const previous = await getState();
@@ -108,7 +129,8 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs) {
       ...emptyState,
       apiBaseUrl,
       waitMs,
-      status: "Senkronizasyon bekleyen kulüp yok",
+      operations,
+      status: "Seçilen işlemler için bekleyen iş yok",
       updatedAt: Date.now()
     };
     await setState(state);
@@ -121,11 +143,12 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs) {
     ...emptyState,
     running: true,
     queue,
+    operations,
     lookups,
     currentJobIndex: 0,
     currentPage: 1,
     totalPages: 1,
-    currentUrl: buildPageUrl(firstJob, 1),
+    currentUrl: buildJobUrl(firstJob, 1),
     tabId: tab.id,
     apiBaseUrl,
     waitMs,
@@ -195,7 +218,9 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     await chrome.tabs.sendMessage(tabId, {
       type: "COLLECT_SYNC_PAGE",
       job: currentJob(state),
+      operation: currentJob(state).operation,
       page: state.currentPage,
+      latestTotalPages: currentJob(state).operation === "coin-card-latest" ? LATEST_COIN_CARD_PAGES : undefined,
       expectedUrl: state.currentUrl,
       waitMs: state.waitMs
     });
@@ -221,31 +246,54 @@ async function handlePageResult(message, sender) {
   if (!isCurrentPageSender(state, message, sender)) return { ok: false, error: "Eski sayfa sonucu yok sayıldı." };
 
   const job = currentJob(state);
-  const totalPages = state.currentPage === 1
+  const isLatestCoinCardJob = job.operation === "coin-card-latest";
+  const isCoinCardJob = job.operation === "coin-cards";
+  const totalPages = isLatestCoinCardJob ? LATEST_COIN_CARD_PAGES : isCoinCardJob ? 1 : state.currentPage === 1
     ? Math.max(1, Number(message.totalPages) || 1)
     : state.totalPages;
   const players = { ...(state.currentPlayers || {}) };
   let skipped = 0;
   const mappedPlayers = [];
   const pageErrors = normalizePageErrors(message.errors, job, state);
-  for (const rawPlayer of message.players || []) {
+  let currentLatest = state.currentLatest;
+  if (isLatestCoinCardJob) {
+    const pageLatest = message.latestCoinCards || { sourceDate: null, cards: [] };
+    const existingCards = Array.isArray(currentLatest?.cards) ? currentLatest.cards : [];
+    const incomingCards = Array.isArray(pageLatest.cards) ? pageLatest.cards : [];
+    currentLatest = {
+      sourceDate: currentLatest?.sourceDate || pageLatest.sourceDate || null,
+      cards: dedupeLatestCoinCards([...existingCards, ...incomingCards])
+    };
+    skipped += pageErrors.length;
+  } else if (isCoinCardJob) {
     try {
-      const player = mapPlayer(rawPlayer, state.lookups);
-      if (!player) {
-        skipped++;
-        continue;
-      }
-      players[String(player.futbinPlayerId)] = player;
-      mappedPlayers.push(player);
+      const card = normalizeCoinCardDetail(message.coinCard, job);
+      players[String(job.id)] = card;
+      mappedPlayers.push(toCoinCardDisplayPlayer(card, job));
     } catch (error) {
       skipped++;
-      pageErrors.push(buildErrorEntry({
-        state,
-        job,
-        stage: "map",
-        message: error.message || String(error),
-        player: rawPlayer
-      }));
+      pageErrors.push(buildErrorEntry({ state, job, stage: "parse", message: error.message || String(error) }));
+    }
+  } else {
+    for (const rawPlayer of message.players || []) {
+      try {
+        const player = mapPlayer(rawPlayer, state.lookups);
+        if (!player) {
+          skipped++;
+          continue;
+        }
+        players[String(player.futbinPlayerId)] = player;
+        mappedPlayers.push(player);
+      } catch (error) {
+        skipped++;
+        pageErrors.push(buildErrorEntry({
+          state,
+          job,
+          stage: "map",
+          message: error.message || String(error),
+          player: rawPlayer
+        }));
+      }
     }
   }
   if (pageErrors.length) await appendErrors(pageErrors);
@@ -254,6 +302,7 @@ async function handlePageResult(message, sender) {
   const updated = {
     ...state,
     totalPages,
+    currentLatest,
     currentPlayers: players,
     currentSkipped: (state.currentSkipped || 0) + skipped,
     pagesAttempted: state.pagesAttempted + 1,
@@ -300,7 +349,7 @@ async function recordPageFailure(state, error) {
 async function finishOrScheduleNextPage(state) {
   if (state.currentPage < state.totalPages) {
     const nextPage = state.currentPage + 1;
-    const nextUrl = buildPageUrl(currentJob(state), nextPage);
+    const nextUrl = buildJobUrl(currentJob(state), nextPage);
     const waiting = {
       ...state,
       currentPage: nextPage,
@@ -313,11 +362,13 @@ async function finishOrScheduleNextPage(state) {
     return { ok: true, action: "WAIT_AND_ADVANCE", nextUrl, waitMs: state.waitMs };
   }
 
-  return submitCurrentClubAndPrepareNext(state);
+  return submitCurrentJobAndPrepareNext(state);
 }
 
-async function submitCurrentClubAndPrepareNext(state) {
+async function submitCurrentJobAndPrepareNext(state) {
   const job = currentJob(state);
+  if (job.operation === "coin-card-latest") return submitLatestCoinCardsAndPrepareDetails(state);
+  if (job.operation === "coin-cards") return submitCurrentCoinCardAndPrepareNext(state);
   const players = Object.values(state.currentPlayers || {});
   let saved = 0;
   let skipped = state.currentSkipped || 0;
@@ -393,7 +444,7 @@ async function submitCurrentClubAndPrepareNext(state) {
       skippedPlayers: state.skippedPlayers + skipped,
       clubSaveResults,
       nextRunAt: null,
-      status: `Tamamlandı (${state.queue.length}/${state.queue.length} kulüp)`,
+      status: `Tamamlandı (${state.queue.length}/${state.queue.length} işlem)`,
       updatedAt: Date.now()
     };
     await setState(completed);
@@ -401,7 +452,7 @@ async function submitCurrentClubAndPrepareNext(state) {
   }
 
   const nextJob = state.queue[nextJobIndex];
-  const nextUrl = buildPageUrl(nextJob, 1);
+  const nextUrl = buildJobUrl(nextJob, 1);
   const prepared = {
     ...state,
     currentJobIndex: nextJobIndex,
@@ -419,6 +470,192 @@ async function submitCurrentClubAndPrepareNext(state) {
     clubSaveResults,
     nextRunAt: Date.now() + state.waitMs,
     status: jobStatus(nextJob, nextJobIndex, state.queue.length, "Kulüp sırası bekleniyor"),
+    updatedAt: Date.now()
+  };
+  await setState(prepared);
+  return { ok: true, action: "WAIT_AND_ADVANCE", nextUrl, waitMs: state.waitMs };
+}
+
+async function submitLatestCoinCardsAndPrepareDetails(state) {
+  const job = currentJob(state);
+  let inserted = 0;
+  let updated = 0;
+  let deleted = 0;
+  let skipped = state.currentSkipped || 0;
+
+  if (state.currentLatest) {
+    await setState({
+      ...state,
+      nextRunAt: null,
+      status: "Latest Coin Cards: API'ye kaydediliyor",
+      updatedAt: Date.now()
+    });
+    const response = await apiRequest(state.apiBaseUrl, "futbin-sync/coin-card-latest", {
+      method: "POST",
+      body: JSON.stringify({
+        source_date: state.currentLatest.sourceDate,
+        cards: (state.currentLatest.cards || []).map(toApiLatestCoinCard)
+      })
+    });
+    inserted = Number(response?.data?.inserted) || 0;
+    updated = Number(response?.data?.updated) || 0;
+    deleted = Number(response?.data?.deleted) || 0;
+    skipped += Number(response?.data?.skipped) || 0;
+    const responseErrors = Array.isArray(response?.data?.errors) ? response.data.errors : [];
+    if (responseErrors.length) {
+      await appendErrors(responseErrors.map((message) => buildErrorEntry({
+        state,
+        job,
+        stage: "latest-after-post",
+        message
+      })));
+    }
+  }
+
+  const jobsResponse = await apiRequest(state.apiBaseUrl, "futbin-sync/coin-card-jobs");
+  const detailJobs = (Array.isArray(jobsResponse?.data?.jobs) ? jobsResponse.data.jobs : [])
+    .map((detailJob) => ({ ...detailJob, operation: "coin-cards" }));
+  const queue = [
+    ...state.queue.slice(0, state.currentJobIndex + 1),
+    ...detailJobs,
+    ...state.queue.slice(state.currentJobIndex + 1)
+  ];
+  const clubSaveResults = {
+    ...(state.clubSaveResults || {}),
+    "coin-card:latest": {
+      saved: inserted,
+      skipped,
+      inserted,
+      updated,
+      deleted,
+      posted: state.currentLatest?.cards?.length || 0,
+      savedAt: Date.now()
+    }
+  };
+  const nextJobIndex = state.currentJobIndex + 1;
+
+  if (nextJobIndex >= queue.length) {
+    const completed = {
+      ...state,
+      queue,
+      running: false,
+      completedClubs: state.completedClubs + 1,
+      savedPlayers: state.savedPlayers + inserted + updated,
+      skippedPlayers: state.skippedPlayers + skipped,
+      clubSaveResults,
+      currentLatest: null,
+      nextRunAt: null,
+      status: `Tamamlandı (${queue.length}/${queue.length} işlem)`,
+      updatedAt: Date.now()
+    };
+    await setState(completed);
+    return { ok: true, action: "COMPLETE" };
+  }
+
+  const nextJob = queue[nextJobIndex];
+  const nextUrl = buildJobUrl(nextJob, 1);
+  const prepared = {
+    ...state,
+    queue,
+    currentJobIndex: nextJobIndex,
+    currentPage: 1,
+    totalPages: 1,
+    currentUrl: nextUrl,
+    currentPlayers: {},
+    currentLatest: null,
+    currentSkipped: 0,
+    pagesAttempted: 0,
+    pagesSucceeded: 0,
+    failedPages: [],
+    completedClubs: state.completedClubs + 1,
+    savedPlayers: state.savedPlayers + inserted + updated,
+    skippedPlayers: state.skippedPlayers + skipped,
+    clubSaveResults,
+    nextRunAt: Date.now() + state.waitMs,
+    status: jobStatus(nextJob, nextJobIndex, queue.length, "İş sırası bekleniyor"),
+    updatedAt: Date.now()
+  };
+  await setState(prepared);
+  return { ok: true, action: "WAIT_AND_ADVANCE", nextUrl, waitMs: state.waitMs };
+}
+
+async function submitCurrentCoinCardAndPrepareNext(state) {
+  const job = currentJob(state);
+  const card = state.currentPlayers?.[String(job.id)];
+  let saved = 0;
+  let skipped = state.currentSkipped || 0;
+  let inserted = 0;
+  let updated = 0;
+  let deleted = 0;
+
+  if (card) {
+    await setState({
+      ...state,
+      nextRunAt: null,
+      status: `${job.label || "Coin Cards"}: API'ye kaydediliyor`,
+      updatedAt: Date.now()
+    });
+    const response = await apiRequest(state.apiBaseUrl, `futbin-sync/coin-card-jobs/${job.id}`, {
+      method: "POST",
+      body: JSON.stringify(toApiCoinCard(card))
+    });
+    saved = Number(response?.data?.saved) || 0;
+    skipped += Number(response?.data?.skipped) || 0;
+    inserted = Number(response?.data?.inserted) || 0;
+    updated = Number(response?.data?.updated) || 0;
+    deleted = Number(response?.data?.deleted) || 0;
+    const responseErrors = Array.isArray(response?.data?.errors) ? response.data.errors : [];
+    if (responseErrors.length) {
+      await appendErrors(responseErrors.map((message) => buildErrorEntry({
+        state,
+        job,
+        stage: "after-post",
+        message
+      })));
+    }
+  }
+
+  const resultKey = `coin-card:${job.id}`;
+  const clubSaveResults = {
+    ...(state.clubSaveResults || {}),
+    [resultKey]: { saved, skipped, inserted, updated, deleted, posted: card ? 1 : 0, savedAt: Date.now() }
+  };
+  const nextJobIndex = state.currentJobIndex + 1;
+  if (nextJobIndex >= state.queue.length) {
+    const completed = {
+      ...state,
+      running: false,
+      completedClubs: state.completedClubs + 1,
+      savedPlayers: state.savedPlayers + saved,
+      skippedPlayers: state.skippedPlayers + skipped,
+      clubSaveResults,
+      nextRunAt: null,
+      status: `Tamamlandı (${state.queue.length}/${state.queue.length} işlem)`,
+      updatedAt: Date.now()
+    };
+    await setState(completed);
+    return { ok: true, action: "COMPLETE" };
+  }
+
+  const nextJob = state.queue[nextJobIndex];
+  const nextUrl = buildJobUrl(nextJob, 1);
+  const prepared = {
+    ...state,
+    currentJobIndex: nextJobIndex,
+    currentPage: 1,
+    totalPages: 1,
+    currentUrl: nextUrl,
+    currentPlayers: {},
+    currentSkipped: 0,
+    pagesAttempted: 0,
+    pagesSucceeded: 0,
+    failedPages: [],
+    completedClubs: state.completedClubs + 1,
+    savedPlayers: state.savedPlayers + saved,
+    skippedPlayers: state.skippedPlayers + skipped,
+    clubSaveResults,
+    nextRunAt: Date.now() + state.waitMs,
+    status: jobStatus(nextJob, nextJobIndex, state.queue.length, "İş sırası bekleniyor"),
     updatedAt: Date.now()
   };
   await setState(prepared);
@@ -467,8 +704,8 @@ async function appendPageLog(state) {
     url: state.currentUrl,
     page: state.currentPage,
     clubId: job.club_id,
-    clubName: job.club_name || "Kulüp",
-    leagueName: job.league_name || "Lig"
+    clubName: isCoinCardOperation(job) ? job.label : job.club_name || "Kulüp",
+    leagueName: isCoinCardOperation(job) ? "Coin Cards" : job.league_name || "Lig"
   };
   await chrome.storage.local.set({ [LOGS_KEY]: [entry, ...logs].slice(0, MAX_LOGS) });
 }
@@ -494,8 +731,8 @@ function buildErrorEntry({ state, job, stage, message, player }) {
     url: state?.currentUrl || null,
     page: state?.currentPage || null,
     clubId: job?.club_id,
-    clubName: job?.club_name || "Kulüp",
-    leagueName: job?.league_name || "Lig"
+    clubName: isCoinCardOperation(job) ? job.label : job?.club_name || "Kulüp",
+    leagueName: isCoinCardOperation(job) ? "Coin Cards" : job?.league_name || "Lig"
   };
 }
 
@@ -521,18 +758,58 @@ async function failSync(error) {
 }
 
 async function apiRequest(apiBaseUrl, endpoint, options = {}) {
-  const response = await fetch(new URL(endpoint, apiBaseUrl).href, {
-    method: options.method || "GET",
+  const url = new URL(endpoint, apiBaseUrl).href;
+  const method = options.method || "GET";
+  const body = options.body;
+  let response;
+  let payload = {};
+  let rawText = "";
+
+  console.groupCollapsed(`[FutbinSync API] ${method} ${url}`);
+  console.log("request", {
+    method,
+    url,
     headers: { "Content-Type": "application/json" },
-    body: options.body
+    body: parseJsonForLog(body)
   });
-  const payload = await response.json().catch(() => ({}));
+
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body
+    });
+    rawText = await response.text();
+    payload = parseJsonForLog(rawText) || {};
+    console.log("response", {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      body: payload,
+      rawText
+    });
+  } catch (error) {
+    console.error("request failed", error);
+    throw error;
+  } finally {
+    console.groupEnd();
+  }
+
   if (!response.ok || payload?.result === false) {
     const error = new Error(payload?.message || `API isteği başarısız (${response.status})`);
     error.critical = payload?.error_code === "CRITICAL";
     throw error;
   }
   return payload;
+}
+
+function parseJsonForLog(value) {
+  if (!value || typeof value !== "string") return value || null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 function normalizeApiBaseUrl(value) {
@@ -542,7 +819,13 @@ function normalizeApiBaseUrl(value) {
   return url.href;
 }
 
-function buildPageUrl(job, page) {
+function buildJobUrl(job, page) {
+  if (job?.operation === "coin-card-latest") {
+    const url = new URL(job.url || FUTBIN_LATEST_URL);
+    url.searchParams.set("page", String(page));
+    return url.href;
+  }
+  if (job?.operation === "coin-cards") return job.url;
   const url = new URL(job.url || "https://www.futbin.com/players");
   url.searchParams.set("page", String(page));
   url.searchParams.set("club", String(job.futbin_club_id));
@@ -557,6 +840,10 @@ function currentJob(state) {
   return state.queue?.[state.currentJobIndex] || {};
 }
 
+function isCoinCardOperation(job) {
+  return job?.operation === "coin-cards" || job?.operation === "coin-card-latest";
+}
+
 function isCurrentPageSender(state, message, sender) {
   return Boolean(
     state.running &&
@@ -567,6 +854,8 @@ function isCurrentPageSender(state, message, sender) {
 }
 
 function jobStatus(job, index, total, suffix) {
+  if (isCoinCardOperation(job))
+    return `${job.label || "Coin Cards"} (${index + 1}/${total}) · ${suffix}`;
   return `${job?.league_name || "Lig"} → ${job?.club_name || "Kulüp"} (${index + 1}/${total}) · ${suffix}`;
 }
 
@@ -582,11 +871,105 @@ function matchesCurrentFutbinPage(value, state) {
   try {
     const url = new URL(value);
     const job = currentJob(state);
+    if (job?.operation === "coin-card-latest") {
+      const page = url.searchParams.get("page") || "1";
+      return /(^|\.)futbin\.com$/i.test(url.hostname) &&
+        url.pathname.replace(/\/+$/, "") === "/latest" &&
+        page === String(state.currentPage);
+    }
+    if (job?.operation === "coin-cards") return sameUrl(url.href, state.currentUrl);
     return /(^|\.)futbin\.com$/i.test(url.hostname) &&
       url.searchParams.get("page") === String(state.currentPage) &&
       url.searchParams.get("club") === String(job.futbin_club_id) &&
       url.searchParams.get("league") === String(job.futbin_league_id);
   } catch { return sameUrl(value, state.currentUrl); }
+}
+
+function normalizeCoinCardDetail(value, job) {
+  if (!value || typeof value !== "object") throw new Error("Coin Card detay verisi okunamadı.");
+  return {
+    playerName: normalizeText(value.playerName) || job.label || `Coin Card #${job.id}`,
+    rating: positiveNumberOrNull(value.rating),
+    position: normalizeText(value.position),
+    playerImgUrl: normalizeText(value.playerImgUrl) || null,
+    bgCardUrl: normalizeText(value.bgCardUrl) || null,
+    nationImgUrl: normalizeText(value.nationImgUrl) || null,
+    minPriceCross: positiveNumberOrNull(value.minPriceCross),
+    priceCross: positiveNumberOrNull(value.priceCross),
+    maxPriceCross: positiveNumberOrNull(value.maxPriceCross),
+    minPricePc: positiveNumberOrNull(value.minPricePc),
+    pricePc: positiveNumberOrNull(value.pricePc),
+    maxPricePc: positiveNumberOrNull(value.maxPricePc)
+  };
+}
+
+function positiveNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function toCoinCardDisplayPlayer(card, job) {
+  return {
+    futbinPlayerId: Number(job.id),
+    futbinPlayerLink: job.url,
+    name: card.playerName,
+    positionName: card.position,
+    rating: card.rating,
+    qualityCode: "coin",
+    rarityName: "Coin Card",
+    priceConsole: card.priceCross || card.pricePc || 0,
+    urlImgCard: card.bgCardUrl,
+    urlImgPlayer: card.playerImgUrl,
+    urlImgNation: card.nationImgUrl,
+    leagueName: "Coin Cards",
+    clubName: card.playerName,
+    active: true
+  };
+}
+
+function toApiLatestCoinCard(card) {
+  return {
+    player_name: card.playerName,
+    rating: card.rating,
+    position: card.position,
+    url: card.url,
+    player_img_url: card.playerImgUrl,
+    bg_card_url: card.bgCardUrl,
+    nation_img_url: card.nationImgUrl,
+    min_price_cross: card.minPriceCross,
+    price_cross: card.priceCross,
+    max_price_cross: card.maxPriceCross,
+    min_price_pc: card.minPricePc,
+    price_pc: card.pricePc,
+    max_price_pc: card.maxPricePc
+  };
+}
+
+function dedupeLatestCoinCards(cards) {
+  const merged = new Map();
+  for (const card of cards || []) {
+    const key = normalizeText(card?.url).toLowerCase();
+    if (!key) continue;
+    merged.set(key, card);
+  }
+  return [...merged.values()];
+}
+
+function toApiCoinCard(card) {
+  return {
+    player_name: card.playerName,
+    rating: card.rating,
+    position: card.position,
+    player_img_url: card.playerImgUrl,
+    bg_card_url: card.bgCardUrl,
+    nation_img_url: card.nationImgUrl,
+    min_price_cross: card.minPriceCross,
+    price_cross: card.priceCross,
+    max_price_cross: card.maxPriceCross,
+    min_price_pc: card.minPricePc,
+    price_pc: card.pricePc,
+    max_price_pc: card.maxPricePc
+  };
 }
 
 function toApiPlayer(player) {
@@ -767,10 +1150,12 @@ async function appendRecords(players, pageUrl, job) {
   const stored = await chrome.storage.local.get(RECORDS_KEY);
   const current = stored[RECORDS_KEY] || [];
   const incoming = players.map((player) => ({
-    id: `${job.club_id}:${player.futbinPlayerId}`,
+    id: `${job.operation || "club-players"}:${job.id || job.club_id}:${player.futbinPlayerId}`,
     capturedAt: Date.now(),
     pageUrl,
     job,
+    leagueName: player.leagueName || job.league_name,
+    clubName: player.clubName || job.club_name,
     player
   }));
   const merged = new Map(current.map((record) => [record.id, record]));

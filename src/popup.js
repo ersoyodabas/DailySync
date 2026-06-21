@@ -1,6 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
+const LOCAL_API_BASE_URL = "http://localhost:5055/api/";
 const elements = {
-  apiEnvironment: $("#apiEnvironment"),
+  apiEnvironmentButtons: [...document.querySelectorAll(".environment-button")],
+  operationButtons: [...document.querySelectorAll(".operation-tab")],
   waitMs: $("#waitMs"),
   start: $("#start"),
   resume: $("#resume"),
@@ -26,12 +28,14 @@ const elements = {
 };
 
 let currentState = {};
+let selectedApiBaseUrl = LOCAL_API_BASE_URL;
 init();
 setInterval(renderCountdown, 250);
 
 async function init() {
-  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs"]);
-  if (settings.syncApiBaseUrl) elements.apiEnvironment.value = settings.syncApiBaseUrl;
+  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncOperations"]);
+  setApiEnvironment(settings.syncApiBaseUrl || LOCAL_API_BASE_URL);
+  setOperationSelection(Array.isArray(settings.syncOperations) ? settings.syncOperations : ["club-players"]);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
   const snapshot = await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" });
   render(snapshot.syncState || {}, snapshot.playerRecords || [], snapshot.syncLogs || [], snapshot.syncErrors || []);
@@ -39,6 +43,13 @@ async function init() {
 
 elements.start.addEventListener("click", async () => {
   showError();
+  const operations = elements.operationButtons
+    .filter((button) => button.classList.contains("active"))
+    .map((button) => button.dataset.operation);
+  if (!operations.length) {
+    showError("En az bir işlem seçmelisin.");
+    return;
+  }
   if (currentState.queue?.length && !currentState.running && currentState.currentJobIndex >= 0) {
     const confirmed = confirm("Mevcut ilerleme silinip Backend'den yeni kulüp kuyruğu alınacak. Devam edilsin mi?");
     if (!confirmed) return;
@@ -46,8 +57,9 @@ elements.start.addEventListener("click", async () => {
   await saveSettings();
   const response = await chrome.runtime.sendMessage({
     type: "START_SYNC",
-    apiBaseUrl: elements.apiEnvironment.value,
-    waitMs: Number(elements.waitMs.value)
+    apiBaseUrl: selectedApiBaseUrl,
+    waitMs: Number(elements.waitMs.value),
+    operations
   });
   if (!response?.ok) showError(response?.error || "Tarama başlatılamadı.");
 });
@@ -62,11 +74,24 @@ elements.stop.addEventListener("click", () => chrome.runtime.sendMessage({ type:
 
 elements.clear.addEventListener("click", async () => {
   if (!confirm("Tarama ilerlemesi ve gösterilen oyuncular temizlensin mi?")) return;
-  await chrome.runtime.sendMessage({ type: "CLEAR_SYNC", apiBaseUrl: elements.apiEnvironment.value });
+  await chrome.runtime.sendMessage({ type: "CLEAR_SYNC", apiBaseUrl: selectedApiBaseUrl });
 });
 
-elements.apiEnvironment.addEventListener("change", saveSettings);
+elements.apiEnvironmentButtons.forEach((button) => {
+  button.addEventListener("click", async () => {
+    setApiEnvironment(button.dataset.apiBaseUrl);
+    await saveSettings();
+  });
+});
 elements.waitMs.addEventListener("change", saveSettings);
+
+elements.operationButtons.forEach((button) => {
+  button.addEventListener("click", async () => {
+    const isActive = button.classList.toggle("active");
+    button.setAttribute("aria-pressed", String(isActive));
+    await saveOperationSelection();
+  });
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || (!changes.syncState && !changes.playerRecords && !changes.syncLogs && !changes.syncErrors)) return;
@@ -102,8 +127,37 @@ function openSyncRow(event) {
 
 async function saveSettings() {
   await chrome.storage.local.set({
-    syncApiBaseUrl: elements.apiEnvironment.value,
-    syncWaitMs: Number(elements.waitMs.value)
+    syncApiBaseUrl: selectedApiBaseUrl,
+    syncWaitMs: Number(elements.waitMs.value),
+    syncOperations: selectedOperations()
+  });
+}
+
+async function saveOperationSelection() {
+  await chrome.storage.local.set({ syncOperations: selectedOperations() });
+}
+
+function selectedOperations() {
+  return elements.operationButtons
+    .filter((button) => button.classList.contains("active"))
+    .map((button) => button.dataset.operation);
+}
+
+function setOperationSelection(operations) {
+  const selected = new Set(operations);
+  elements.operationButtons.forEach((button) => {
+    const isActive = selected.has(button.dataset.operation);
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
+function setApiEnvironment(apiBaseUrl) {
+  selectedApiBaseUrl = apiBaseUrl || LOCAL_API_BASE_URL;
+  elements.apiEnvironmentButtons.forEach((button) => {
+    const isActive = button.dataset.apiBaseUrl === selectedApiBaseUrl;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
   });
 }
 
@@ -129,11 +183,18 @@ function render(state = {}, records = [], logs = [], errors = []) {
   elements.updatedCount.textContent = saveTotals.updated;
   elements.deletedCount.textContent = saveTotals.deleted;
   elements.skippedCount.textContent = state.skippedPlayers || 0;
-  elements.currentClub.textContent = currentJob ? `${currentJob.league_name} / ${currentJob.club_name}` : "Kulüp bekleniyor";
+  elements.currentClub.textContent = currentJob
+    ? currentJob.operation === "coin-cards" || currentJob.operation === "coin-card-latest"
+      ? currentJob.label || "Coin Cards"
+      : `${currentJob.league_name} / ${currentJob.club_name}`
+    : "İş bekleniyor";
+  elements.start.hidden = Boolean(state.running);
+  elements.stop.hidden = !state.running;
   elements.start.disabled = Boolean(state.running);
   elements.resume.disabled = Boolean(state.running) || !canResume(state);
   elements.stop.disabled = !state.running;
-  elements.apiEnvironment.disabled = Boolean(state.running);
+  elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(state.running); });
+  elements.operationButtons.forEach((button) => { button.disabled = Boolean(state.running); });
   elements.waitMs.disabled = Boolean(state.running);
   showError(state.error || "");
   renderCountdown();
@@ -175,8 +236,8 @@ function renderRecords(records, errors = [], state = {}) {
 
   records.slice(0, 500).forEach((record) => {
     ensureGroup(
-      record?.job?.league_name || record?.leagueName,
-      record?.job?.club_name || record?.clubName,
+      record?.leagueName || record?.job?.league_name,
+      record?.clubName || record?.job?.club_name,
       record?.job?.club_id || record?.clubId
     ).normal.push(record);
   });
