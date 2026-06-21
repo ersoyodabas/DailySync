@@ -62,13 +62,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_SYNC":
-      return startFreshSync(message.apiBaseUrl, message.waitMs, message.operations);
+      return startFreshSync(message.apiBaseUrl, message.waitMs, message.operations, 0);
     case "RESUME_SYNC":
       return resumePausedSync();
     case "STOP_SYNC":
       return pauseSync();
     case "CLEAR_SYNC":
       await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
+      await chrome.alarms.clear("futbin-sync-loop");
       {
         const current = await getState();
         if (current.tabId) {
@@ -93,7 +94,7 @@ async function handleMessage(message, sender) {
   }
 }
 
-async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
+async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0) {
   const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl);
   const waitMs = Math.min(30000, Math.max(3000, Number(rawWaitMs) || 5000));
   const operations = [...new Set(Array.isArray(rawOperations) ? rawOperations : ["club-players"])]
@@ -118,6 +119,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
     queue.push(...jobs.map((job) => ({ ...job, operation: "club-players" })));
   }
   await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
+  await chrome.alarms.clear("futbin-sync-loop");
 
   const previous = await getState();
   if (previous.tabId) {
@@ -130,6 +132,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
       apiBaseUrl,
       waitMs,
       operations,
+      runCount,
       status: "Seçilen işlemler için bekleyen iş yok",
       updatedAt: Date.now()
     };
@@ -145,6 +148,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
     queue,
     operations,
     lookups,
+    runCount,
     currentJobIndex: 0,
     currentPage: 1,
     totalPages: 1,
@@ -197,16 +201,21 @@ async function resumeRunningSync() {
 
 async function pauseSync() {
   await chrome.alarms.clear(PAGE_TIMEOUT_ALARM);
+  await chrome.alarms.clear("futbin-sync-loop");
   const state = await getState();
-  const paused = {
+  if (state.tabId) {
+    try { await chrome.tabs.remove(state.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+  }
+  const stopped = {
     ...state,
     running: false,
+    tabId: null,
     nextRunAt: null,
-    status: "Kullanıcı tarafından durduruldu; devam etmeye hazır",
+    status: "Durduruldu",
     updatedAt: Date.now()
   };
-  await setState(paused);
-  return { ok: true, state: paused };
+  await setState(stopped);
+  return { ok: true, state: stopped };
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -235,6 +244,12 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "futbin-sync-loop") {
+    const state = await getState();
+    if (!state.running) return;
+    await startFreshSync(state.apiBaseUrl, state.waitMs, state.operations, (state.runCount || 0) + 1);
+    return;
+  }
   if (alarm.name !== PAGE_TIMEOUT_ALARM) return;
   const state = await getState();
   if (!state.running) return;
@@ -436,19 +451,7 @@ async function submitCurrentJobAndPrepareNext(state) {
 
   const nextJobIndex = state.currentJobIndex + 1;
   if (nextJobIndex >= state.queue.length) {
-    const completed = {
-      ...state,
-      running: false,
-      completedClubs: state.completedClubs + 1,
-      savedPlayers: state.savedPlayers + saved,
-      skippedPlayers: state.skippedPlayers + skipped,
-      clubSaveResults,
-      nextRunAt: null,
-      status: `Tamamlandı (${state.queue.length}/${state.queue.length} işlem)`,
-      updatedAt: Date.now()
-    };
-    await setState(completed);
-    return { ok: true, action: "COMPLETE" };
+    return scheduleNextLoop(state, saved, skipped, clubSaveResults, null);
   }
 
   const nextJob = state.queue[nextJobIndex];
@@ -535,21 +538,7 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
   const nextJobIndex = state.currentJobIndex + 1;
 
   if (nextJobIndex >= queue.length) {
-    const completed = {
-      ...state,
-      queue,
-      running: false,
-      completedClubs: state.completedClubs + 1,
-      savedPlayers: state.savedPlayers + inserted + updated,
-      skippedPlayers: state.skippedPlayers + skipped,
-      clubSaveResults,
-      currentLatest: null,
-      nextRunAt: null,
-      status: `Tamamlandı (${queue.length}/${queue.length} işlem)`,
-      updatedAt: Date.now()
-    };
-    await setState(completed);
-    return { ok: true, action: "COMPLETE" };
+    return scheduleNextLoop(state, inserted + updated, skipped, clubSaveResults, queue);
   }
 
   const nextJob = queue[nextJobIndex];
@@ -613,6 +602,8 @@ async function submitCurrentCoinCardAndPrepareNext(state) {
         message
       })));
     }
+    const saveStatus = inserted > 0 ? "inserted" : updated > 0 ? "updated" : "unchanged";
+    await updateRecordSaveStatus(job, saveStatus);
   }
 
   const resultKey = `coin-card:${job.id}`;
@@ -622,19 +613,7 @@ async function submitCurrentCoinCardAndPrepareNext(state) {
   };
   const nextJobIndex = state.currentJobIndex + 1;
   if (nextJobIndex >= state.queue.length) {
-    const completed = {
-      ...state,
-      running: false,
-      completedClubs: state.completedClubs + 1,
-      savedPlayers: state.savedPlayers + saved,
-      skippedPlayers: state.skippedPlayers + skipped,
-      clubSaveResults,
-      nextRunAt: null,
-      status: `Tamamlandı (${state.queue.length}/${state.queue.length} işlem)`,
-      updatedAt: Date.now()
-    };
-    await setState(completed);
-    return { ok: true, action: "COMPLETE" };
+    return scheduleNextLoop(state, saved, skipped, clubSaveResults, null);
   }
 
   const nextJob = state.queue[nextJobIndex];
@@ -1156,11 +1135,20 @@ async function appendRecords(players, pageUrl, job) {
     job,
     leagueName: player.leagueName || job.league_name,
     clubName: player.clubName || job.club_name,
+    saveStatus: null,
     player
   }));
   const merged = new Map(current.map((record) => [record.id, record]));
   for (const record of incoming) merged.set(record.id, record);
   await chrome.storage.local.set({ [RECORDS_KEY]: [...merged.values()].reverse().slice(0, MAX_RECORDS) });
+}
+
+async function updateRecordSaveStatus(job, saveStatus) {
+  const recordId = `${job.operation}:${job.id}:`;
+  const stored = await chrome.storage.local.get(RECORDS_KEY);
+  const records = stored[RECORDS_KEY] || [];
+  const updated = records.map((r) => r.id.startsWith(recordId) ? { ...r, saveStatus } : r);
+  await chrome.storage.local.set({ [RECORDS_KEY]: updated });
 }
 
 async function getState() {
@@ -1171,4 +1159,28 @@ async function getState() {
 async function setState(state) {
   await chrome.storage.local.set({ [STATE_KEY]: state });
   chrome.runtime.sendMessage({ type: "STATE_CHANGED", state }).catch(() => {});
+}
+
+async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults, queue) {
+  const isClubPlayersActive = state.operations.includes("club-players");
+  const waitMs = isClubPlayersActive ? 2 * 60 * 60 * 1000 : 60 * 60 * 1000;
+  const loopNumber = (state.runCount || 0) + 1;
+  const targetTime = Date.now() + waitMs;
+
+  const waiting = {
+    ...state,
+    queue: queue || state.queue,
+    completedClubs: state.completedClubs + 1,
+    savedPlayers: state.savedPlayers + (totalSaved || 0),
+    skippedPlayers: state.skippedPlayers + (totalSkipped || 0),
+    clubSaveResults,
+    currentLatest: null,
+    nextRunAt: targetTime,
+    status: `Döngü bitti. ${loopNumber}. döngü bekleniyor...`,
+    updatedAt: Date.now()
+  };
+  await setState(waiting);
+  await chrome.alarms.create("futbin-sync-loop", { when: targetTime });
+
+  return { ok: true, action: "WAIT_AND_ADVANCE", waitMs };
 }

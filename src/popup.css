@@ -103,6 +103,13 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 
 .player-list-panel { display:flex; min-width:0; height:100%; flex-direction:column; margin:0; padding:0; overflow:hidden; }
 .table-title { flex:0 0 auto; padding:13px 14px 11px; border-bottom:1px solid #252a35; }
+.list-tabs { display:flex; gap:4px; margin-top:10px; }
+.list-tab { background:transparent; border:1px solid transparent; color:#7f8999; padding:5px 12px; font-size:10px; font-weight:700; border-radius:6px; cursor:pointer; }
+.list-tab.active { background:#183729; color:#72e6ad; border-color:#2d5947; }
+.list-tab:hover:not(.active) { color:#cdd3df; background:#171c24; }
+.run-count-wrap { margin-left:auto; text-align:right; }
+.run-count-wrap small { color:#778f84; font-size:8px; font-weight:800; letter-spacing:.7px; }
+.run-count-wrap b { margin-top:2px; color:#dff8ec; font-size:12px; font-variant-numeric:tabular-nums; }
 .scroll-hint { display:flex; align-items:center; gap:5px; color:#6f798a; font-size:10px; }
 .scroll-hint svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
 .player-list-scroll { flex:1; min-width:0; overflow:auto; scrollbar-color:#3b4555 #11151c; scrollbar-width:thin; }
@@ -111,6 +118,14 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .club-player-header,.player-data-row { display:grid; width:calc(100% - 38px); min-width:574px; margin-left:38px; grid-template-columns:44px 150px 34px 34px 42px 42px 42px 42px 72px 72px; align-items:center; }
 .sync-header,.sync-row { width:100%; min-width:446px; margin-left:0; grid-template-columns:34px 100px 34px 46px 42px 36px 36px 34px fit-content(84px); }
 .sync-header { position:relative; z-index:1; }
+.coin-card-header,.coin-card-row { grid-template-columns:54px 1fr 36px 36px fit-content(110px); }
+.coin-card-row { min-height:52px; }
+.coin-card-row .price-cell { justify-content:flex-end; text-align:right; }
+.cc-card-cell { padding:2px 3px; }
+.cc-card-wrap { position:relative; display:flex; align-items:flex-end; justify-content:center; width:48px; height:48px; background-size:contain; background-repeat:no-repeat; background-position:center; flex-shrink:0; }
+.cc-player-img { position:absolute; bottom:8px; left:50%; transform:translateX(-50%); width:34px; height:34px; object-fit:contain; pointer-events:none; }
+.cc-pos-label { position:absolute; top:4px; left:3px; font-size:6px; font-weight:900; color:#fff; text-shadow:0 1px 2px #000; letter-spacing:.3px; line-height:1; pointer-events:none; }
+.cc-rating-label { position:absolute; top:4px; right:3px; font-size:6px; font-weight:900; color:#fff; text-shadow:0 1px 2px #000; letter-spacing:.3px; line-height:1; pointer-events:none; }
 .club-player-header { min-height:23px; border-bottom:1px solid #313946; background:#181d25; color:#748094; font-size:8px; font-weight:800; letter-spacing:.35px; text-transform:uppercase; }
 .club-player-header span { padding:2px 4px; text-align:center; }
 .sync-header span:nth-child(2) { text-align:left; }
