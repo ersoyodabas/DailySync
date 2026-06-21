@@ -13,7 +13,9 @@ const elements = {
   clubCount: $("#clubCount"),
   pageCount: $("#pageCount"),
   recordCount: $("#recordCount"),
-  savedCount: $("#savedCount"),
+  insertedCount: $("#insertedCount"),
+  updatedCount: $("#updatedCount"),
+  deletedCount: $("#deletedCount"),
   skippedCount: $("#skippedCount"),
   logCount: $("#logCount"),
   errorLogs: $("#errorLogs"),
@@ -118,7 +120,14 @@ function render(state = {}, records = [], logs = [], errors = []) {
   elements.clubCount.textContent = `${Math.min(currentClubNumber, totalClubs)} / ${totalClubs}`;
   elements.pageCount.textContent = `${state.currentPage || 0} / ${state.totalPages || 0}`;
   elements.recordCount.textContent = currentPlayers;
-  elements.savedCount.textContent = state.savedPlayers || 0;
+  const saveTotals = Object.values(state.clubSaveResults || {}).reduce((totals, result) => ({
+    inserted: totals.inserted + (Number(result?.inserted) || 0),
+    updated: totals.updated + (Number(result?.updated) || 0),
+    deleted: totals.deleted + (Number(result?.deleted) || 0)
+  }), { inserted: 0, updated: 0, deleted: 0 });
+  elements.insertedCount.textContent = saveTotals.inserted;
+  elements.updatedCount.textContent = saveTotals.updated;
+  elements.deletedCount.textContent = saveTotals.deleted;
   elements.skippedCount.textContent = state.skippedPlayers || 0;
   elements.currentClub.textContent = currentJob ? `${currentJob.league_name} / ${currentJob.club_name}` : "Kulüp bekleniyor";
   elements.start.disabled = Boolean(state.running);
