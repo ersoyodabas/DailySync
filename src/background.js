@@ -45,6 +45,7 @@ const emptyState = {
   skippedPlayers: 0,
   clubSaveResults: {},
   nextRunAt: null,
+  runStartedAt: null,
   status: "Hazır",
   error: null,
   updatedAt: null
@@ -139,6 +140,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
 
   const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl);
   const waitMs = Math.min(30000, Math.max(3000, Number(rawWaitMs) || 5000));
+  const runStartedAt = Date.now();
 
   const queue = [];
   let lookups = null;
@@ -173,6 +175,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
       waitMs,
       operations,
       runCount,
+      runStartedAt,
       status: "Seçilen işlemler için bekleyen iş yok",
       updatedAt: Date.now()
     };
@@ -190,6 +193,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
     operations,
     lookups,
     runCount,
+    runStartedAt,
     currentJobIndex: 0,
     currentPage: 1,
     totalPages: 1,
@@ -403,7 +407,7 @@ async function handlePageResult(message, sender) {
     .some((id) => Number(id) === Number(job.id))
     ? "inserted"
     : null;
-  await appendRecords(mappedPlayers, state.currentUrl, job, initialSaveStatus);
+  await appendRecords(mappedPlayers, state.currentUrl, job, initialSaveStatus, state);
 
   const updated = {
     ...state,
@@ -633,7 +637,8 @@ async function submitLatestCoinCardsAndPrepareDetails(state) {
       [toCoinCardDisplayPlayer(latestCard, detailJob)],
       detailJob.url,
       detailJob,
-      "inserted"
+      "inserted",
+      state
     );
   }
   const updateJobs = detailJobs.filter((detailJob) => !newlyInsertedCoinCardIds.includes(Number(detailJob.id)));
@@ -805,6 +810,9 @@ async function appendPageLog(state) {
       requestedAt: Date.now(),
       url: state.currentUrl,
       page: state.currentPage,
+      runnerId: state.runnerId || null,
+      runCount: state.runCount || 0,
+      runStartedAt: state.runStartedAt || null,
       clubId: job.club_id,
       clubName: isCoinCardOperation(job) ? job.label : job.club_name || "Kulüp",
       leagueName: isCoinCardOperation(job) ? "Coin Cards" : job.league_name || "Lig"
@@ -833,6 +841,9 @@ function buildErrorEntry({ state, job, stage, message, player }) {
     message: playerLabel ? `${message} [player=${playerLabel}]` : message,
     url: state?.currentUrl || null,
     page: state?.currentPage || null,
+    runnerId: state?.runnerId || null,
+    runCount: state?.runCount || 0,
+    runStartedAt: state?.runStartedAt || null,
     clubId: job?.club_id,
     clubName: isCoinCardOperation(job) ? job.label : job?.club_name || "Kulüp",
     leagueName: isCoinCardOperation(job) ? "Coin Cards" : job?.league_name || "Lig"
@@ -1040,7 +1051,11 @@ function toCoinCardDisplayPlayer(card, job) {
     qualityCode: "coin",
     rarityName: "Coin Card",
     priceConsole: card.priceCross || null,
+    minPriceConsole: card.minPriceCross || null,
+    maxPriceConsole: card.maxPriceCross || null,
     pricePc: card.pricePc || null,
+    minPricePc: card.minPricePc || null,
+    maxPricePc: card.maxPricePc || null,
     urlImgCard: card.bgCardUrl,
     urlImgPlayer: card.playerImgUrl,
     urlImgNation: card.nationImgUrl,
@@ -1278,7 +1293,7 @@ function normalizeText(value) {
   return String(value || "").trim().replace(/\s+/g, " ");
 }
 
-async function appendRecords(players, pageUrl, job, saveStatus = null) {
+async function appendRecords(players, pageUrl, job, saveStatus = null, state = null) {
   if (!players.length) return;
   await enqueueStorageWrite(async () => {
     const stored = await chrome.storage.local.get(RECORDS_KEY);
@@ -1288,6 +1303,9 @@ async function appendRecords(players, pageUrl, job, saveStatus = null) {
       capturedAt: Date.now(),
       pageUrl,
       job,
+      runnerId: state?.runnerId || null,
+      runCount: state?.runCount || 0,
+      runStartedAt: state?.runStartedAt || null,
       leagueName: player.leagueName || job.league_name,
       clubName: player.clubName || job.club_name,
       saveStatus,

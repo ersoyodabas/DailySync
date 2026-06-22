@@ -24,6 +24,7 @@ const elements = {
   error: $("#error"),
   currentClub: $("#currentClub"),
   contentTabs: [...document.querySelectorAll(".content-tab")],
+  contentTabCheckboxes: [...document.querySelectorAll(".content-tab-checkbox")],
   listTitle: $("#listTitle"),
   runCount: $("#runCount")
 };
@@ -36,12 +37,17 @@ let currentContentTab = "web-app-sync";
 let currentListTab = "web-app-sync";
 let selectedApiBaseUrl = LOCAL_API_BASE_URL;
 const collapsedCoinSections = new Set();
+const collapsedCycleGroups = new Set();
+const expandedCycleGroups = new Set();
+const collapsedLeagueGroups = new Set();
+const collapsedClubGroups = new Set();
 init();
 setInterval(renderCountdown, 250);
 
 async function init() {
-  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncListTab", "syncContentTab"]);
+  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncListTab", "syncContentTab", "syncActiveContentTabs"]);
   setApiEnvironment(settings.syncApiBaseUrl || LOCAL_API_BASE_URL);
+  setActiveContentTabs(settings.syncActiveContentTabs);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
   setContentTab(settings.syncContentTab || contentNameForList(settings.syncListTab) || "web-app-sync");
   const snapshot = await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" });
@@ -97,10 +103,17 @@ elements.contentTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     setContentTab(tab.dataset.content);
     chrome.storage.local.set({
-      syncOperations: selectedOperations(),
+      syncOperations: allSyncOperations(),
       syncContentTab: tab.dataset.content,
       syncListTab: currentListTab
     });
+    render(currentState, currentRecords, currentLogs, currentErrors);
+  });
+});
+
+elements.contentTabCheckboxes.forEach((checkbox) => {
+  checkbox.addEventListener("change", async () => {
+    await saveSettings();
     render(currentState, currentRecords, currentLogs, currentErrors);
   });
 });
@@ -150,6 +163,44 @@ elements.logs.addEventListener("click", (event) => {
 });
 
 elements.records.addEventListener("click", (event) => {
+  const cycleToggle = event.target.closest(".cycle-group-toggle");
+  if (cycleToggle) {
+    const cycleKey = cycleToggle.dataset.cycleKey;
+    const group = cycleToggle.closest(".cycle-group");
+    const willCollapse = !group.classList.contains("collapsed");
+    group.classList.toggle("collapsed", willCollapse);
+    cycleToggle.setAttribute("aria-expanded", String(!willCollapse));
+    if (willCollapse) {
+      collapsedCycleGroups.add(cycleKey);
+      expandedCycleGroups.delete(cycleKey);
+    } else {
+      expandedCycleGroups.add(cycleKey);
+      collapsedCycleGroups.delete(cycleKey);
+    }
+    return;
+  }
+  const leagueToggle = event.target.closest(".all-players-league-toggle");
+  if (leagueToggle) {
+    const groupKey = leagueToggle.dataset.groupKey;
+    const group = leagueToggle.closest(".all-players-league-group");
+    const willCollapse = !group.classList.contains("collapsed");
+    group.classList.toggle("collapsed", willCollapse);
+    leagueToggle.setAttribute("aria-expanded", String(!willCollapse));
+    if (willCollapse) collapsedLeagueGroups.add(groupKey);
+    else collapsedLeagueGroups.delete(groupKey);
+    return;
+  }
+  const clubToggle = event.target.closest(".all-players-club-toggle");
+  if (clubToggle) {
+    const groupKey = clubToggle.dataset.groupKey;
+    const group = clubToggle.closest(".all-players-club-group");
+    const willCollapse = !group.classList.contains("collapsed");
+    group.classList.toggle("collapsed", willCollapse);
+    clubToggle.setAttribute("aria-expanded", String(!willCollapse));
+    if (willCollapse) collapsedClubGroups.add(groupKey);
+    else collapsedClubGroups.delete(groupKey);
+    return;
+  }
   const toggle = event.target.closest(".coin-section-toggle");
   if (toggle) {
     const sectionName = toggle.dataset.section;
@@ -180,13 +231,15 @@ async function saveSettings() {
   await chrome.storage.local.set({
     syncApiBaseUrl: selectedApiBaseUrl,
     syncWaitMs: Number(elements.waitMs.value),
-    syncOperations: selectedOperations(),
+    syncOperations: allSyncOperations(),
     syncContentTab: currentContentTab,
-    syncListTab: currentListTab
+    syncListTab: currentListTab,
+    syncActiveContentTabs: activeContentTabs()
   });
 }
 
 function selectedOperations() {
+  if (!isContentTabActive(currentContentTab)) return [];
   return (selectedContentTab()?.dataset.operations || "")
     .split(",")
     .map((operation) => operation.trim())
@@ -195,15 +248,47 @@ function selectedOperations() {
 
 function allSyncOperations() {
   return [...new Set(elements.contentTabs.flatMap((tab) =>
-    (tab.dataset.operations || "")
+    (isContentTabActive(tab.dataset.content) ? tab.dataset.operations || "" : "")
       .split(",")
       .map((operation) => operation.trim())
       .filter(Boolean)
   ))];
 }
 
+function setActiveContentTabs(activeTabs) {
+  const activeSet = Array.isArray(activeTabs)
+    ? new Set(activeTabs)
+    : new Set(elements.contentTabs
+      .filter((tab) => tab.dataset.operations)
+      .map((tab) => tab.dataset.content));
+  elements.contentTabCheckboxes.forEach((checkbox) => {
+    const hasOperation = contentTabHasOperation(checkbox.dataset.contentActive);
+    checkbox.checked = hasOperation && activeSet.has(checkbox.dataset.contentActive);
+    checkbox.disabled = !hasOperation;
+  });
+}
+
+function activeContentTabs() {
+  return elements.contentTabCheckboxes
+    .filter((checkbox) => checkbox.checked && contentTabHasOperation(checkbox.dataset.contentActive))
+    .map((checkbox) => checkbox.dataset.contentActive);
+}
+
+function isContentTabActive(contentName) {
+  return elements.contentTabCheckboxes.some((checkbox) =>
+    checkbox.dataset.contentActive === contentName && checkbox.checked && contentTabHasOperation(contentName));
+}
+
+function contentTabByName(contentName) {
+  return elements.contentTabs.find((tab) => tab.dataset.content === contentName);
+}
+
+function contentTabHasOperation(contentName) {
+  return Boolean(contentTabByName(contentName)?.dataset.operations);
+}
+
 function selectedContentTab() {
-  return elements.contentTabs.find((tab) => tab.dataset.content === currentContentTab);
+  return contentTabByName(currentContentTab);
 }
 
 function contentNameForList(listName) {
@@ -301,6 +386,10 @@ function render(state = {}, records = [], logs = [], errors = []) {
   elements.start.disabled = Boolean(state.running) || !allSyncOperations().length;
   elements.stop.disabled = !state.running;
   elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(state.running); });
+  elements.contentTabCheckboxes.forEach((checkbox) => {
+    const hasOperation = contentTabHasOperation(checkbox.dataset.contentActive);
+    checkbox.disabled = Boolean(state.running) || !hasOperation;
+  });
   elements.waitMs.disabled = Boolean(state.running);
   showError(viewState.error || "");
   renderCountdown();
@@ -412,12 +501,94 @@ function renderRecords(records, errors = [], state = {}) {
   const clubErrors = errors.filter((entry) => !isCoinCardEntry(entry));
 
   if (currentListTab === "coin-cards") {
-    elements.records.innerHTML = renderCoinCardSections(coinRecords, coinErrors, true);
+    elements.records.innerHTML = renderCycleGroups(coinRecords, coinErrors, state, (cycleRecords, cycleErrors) =>
+      renderCoinCardSections(cycleRecords, cycleErrors, true));
     return;
   }
 
-  elements.records.innerHTML = renderClubPlayerGroups(clubRecords, clubErrors, state) ||
+  elements.records.innerHTML = renderCycleGroups(clubRecords, clubErrors, state, (cycleRecords, cycleErrors) =>
+    renderClubPlayerGroups(cycleRecords, cycleErrors, state)) ||
     '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
+}
+
+function renderCycleGroups(records, errors = [], state = {}, renderBody) {
+  if (!records.length && !errors.length) return "";
+  const currentKey = cycleKeyFromState(state);
+  const groups = cycleGroups(records, errors);
+
+  return groups.map((group) => {
+    const isCollapsed = cycleGroupCollapsed(group.key, currentKey);
+    const countText = `${group.records.length} kayıt${group.errors.length ? ` · ${group.errors.length} hata` : ""}`;
+    const body = renderBody(group.records, group.errors);
+    return `<div class="cycle-group sync-player-group${isCollapsed ? " collapsed" : ""}">
+      <div class="league-group sync-group-header cycle-group-header">
+        <button class="group-toggle cycle-group-toggle" type="button" data-cycle-key="${escapeHtml(group.key)}" aria-expanded="${String(!isCollapsed)}">
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+          <span class="sync-group-entity"><strong>${escapeHtml(group.label)}</strong></span>
+          ${group.key === currentKey ? '<span class="cycle-current-badge">Aktif tur</span>' : ""}
+          <span class="group-count">${escapeHtml(countText)}</span>
+        </button>
+      </div>
+      <div class="cycle-group-body">${body}</div>
+    </div>`;
+  }).join("");
+}
+
+function cycleGroups(records = [], errors = []) {
+  const groups = new Map();
+  const addEntry = (entry, type) => {
+    const key = cycleKeyForEntry(entry);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: cycleLabelForKey(key),
+        records: [],
+        errors: [],
+        sortAt: cycleTimeForEntry(entry)
+      });
+    }
+    groups.get(key)[type].push(entry);
+  };
+  records.forEach((record) => addEntry(record, "records"));
+  errors.forEach((entry) => addEntry(entry, "errors"));
+  return [...groups.values()].sort((left, right) => right.sortAt - left.sortAt);
+}
+
+function cycleGroupCollapsed(cycleKey, currentKey) {
+  if (expandedCycleGroups.has(cycleKey)) return false;
+  if (collapsedCycleGroups.has(cycleKey)) return true;
+  return cycleKey !== currentKey;
+}
+
+function cycleKeyFromState(state = {}) {
+  return cycleKeyFromTime(state.runStartedAt || state.updatedAt || Date.now());
+}
+
+function cycleKeyForEntry(entry = {}) {
+  return cycleKeyFromTime(cycleTimeForEntry(entry));
+}
+
+function cycleTimeForEntry(entry = {}) {
+  return Number(entry.runStartedAt || entry.capturedAt || entry.processedAt || entry.occurredAt || entry.requestedAt || Date.now());
+}
+
+function cycleKeyFromTime(value) {
+  const date = new Date(Number(value) || Date.now());
+  date.setSeconds(0, 0);
+  return String(date.getTime());
+}
+
+function cycleLabelForKey(key) {
+  const date = new Date(Number(key));
+  if (Number.isNaN(date.getTime())) return "Çalışma turu";
+  return `Çalışma turu · ${new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date)}`;
 }
 
 function renderCoinCardSections(records, errors = [], showEmpty = true) {
@@ -451,41 +622,136 @@ function renderCoinCardSections(records, errors = [], showEmpty = true) {
 function renderClubPlayerGroups(records, errors = [], state = {}) {
   if (!records.length && !errors.length) return "";
 
-  const groups = new Map();
-  const ensureGroup = (leagueName, clubName, clubId) => {
+  const leagueGroups = new Map();
+  const ensureLeagueGroup = (leagueName, sourceEntry = {}) => {
     const league = String(leagueName || "Lig").trim() || "Lig";
+    const key = `${cycleKeyForEntry(sourceEntry)}:league:${league}`;
+    if (!leagueGroups.has(key)) {
+      leagueGroups.set(key, { key, league, clubs: new Map(), normal: [], errors: [], player: {} });
+    }
+    return leagueGroups.get(key);
+  };
+  const ensureClubGroup = (leagueName, clubName, clubId, sourceEntry = {}) => {
+    const leagueGroup = ensureLeagueGroup(leagueName, sourceEntry);
     const club = String(clubName || "Kulüp").trim() || "Kulüp";
-    const key = `${league}\u0000${clubId || club}`;
-    if (!groups.has(key)) groups.set(key, { league, club, clubId, normal: [], errors: [] });
-    return groups.get(key);
+    const key = `${leagueGroup.league}\u0000${clubId || club}`;
+    if (!leagueGroup.clubs.has(key)) {
+      leagueGroup.clubs.set(key, {
+        key: `${leagueGroup.key}:club:${clubId || club}`,
+        league: leagueGroup.league,
+        club,
+        clubId,
+        normal: [],
+        errors: [],
+        player: {}
+      });
+    }
+    return leagueGroup.clubs.get(key);
   };
 
   records.slice(0, 500).forEach((record) => {
-    ensureGroup(
+    const group = ensureClubGroup(
       record?.leagueName || record?.job?.league_name,
       record?.clubName || record?.job?.club_name,
-      record?.job?.club_id || record?.clubId
-    ).normal.push(record);
+      record?.job?.club_id || record?.clubId,
+      record
+    );
+    group.normal.push(record);
+    const player = record?.player || {};
+    if (!group.player.urlImgLeague && player.urlImgLeague) group.player.urlImgLeague = player.urlImgLeague;
+    if (!group.player.urlImgClub && player.urlImgClub) group.player.urlImgClub = player.urlImgClub;
+    const leagueGroup = ensureLeagueGroup(group.league, record);
+    leagueGroup.normal.push(record);
+    if (!leagueGroup.player.urlImgLeague && player.urlImgLeague) leagueGroup.player.urlImgLeague = player.urlImgLeague;
   });
   errors.slice(0, 300).forEach((entry) => {
-    ensureGroup(entry?.leagueName, entry?.clubName, entry?.clubId).errors.push(entry);
+    const group = ensureClubGroup(entry?.leagueName, entry?.clubName, entry?.clubId, entry);
+    group.errors.push(entry);
+    ensureLeagueGroup(group.league, entry).errors.push(entry);
   });
 
-  return [...groups.values()]
-    .sort((left, right) => left.league.localeCompare(right.league, "tr") || left.club.localeCompare(right.club, "tr"))
-    .map((group) => {
-      const saveResult = group.clubId != null ? state.clubSaveResults?.[String(group.clubId)] : null;
-      const saveText = saveResult ? ` · ${Number(saveResult.inserted) || 0} yeni · ${Number(saveResult.updated) || 0} güncellendi` : "";
-      const countText = `${group.normal.length} okunan${group.errors.length ? ` · ${group.errors.length} hata` : ""}${saveText}`;
-      const groupPlayer = group.normal.find((record) => record?.player?.urlImgLeague || record?.player?.urlImgClub)?.player || {};
-      const rows = [
-        `<div class="league-group sync-group-header"><span class="sync-group-entity">${groupEntityImage(groupPlayer.urlImgLeague, group.league)}<strong>${escapeHtml(group.league)}</strong></span><span class="group-separator">/</span><span class="sync-group-entity">${groupEntityImage(groupPlayer.urlImgClub, group.club)}<strong>${escapeHtml(group.club)}</strong></span><span class="group-count">${escapeHtml(countText)}</span></div>`,
-        renderPlayerHeader(),
-        ...group.errors.map(renderErrorRecord),
-        ...group.normal.map(renderPlayerRecord)
-      ];
-      return `<div class="sync-player-group">${rows.join("")}</div>`;
+  return [...leagueGroups.values()]
+    .sort((left, right) => left.league.localeCompare(right.league, "tr"))
+    .map((leagueGroup) => {
+      const clubs = [...leagueGroup.clubs.values()]
+        .sort((left, right) => left.club.localeCompare(right.club, "tr"));
+      const leagueStats = aggregateClubStats(clubs, state);
+      const clubRows = clubs.map((clubGroup) => {
+        const clubStats = clubGroupStats(clubGroup, state);
+        const isClubCollapsed = collapsedClubGroups.has(clubGroup.key);
+        const rows = [
+          `<div class="club-group sync-group-header all-players-club-header">
+            <button class="group-toggle all-players-club-toggle" type="button" data-group-key="${escapeHtml(clubGroup.key)}" aria-expanded="${String(!isClubCollapsed)}">
+              <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+              <span class="sync-group-entity">${groupEntityImage(clubGroup.player.urlImgClub, clubGroup.club)}<strong>${escapeHtml(clubGroup.club)}</strong></span>
+              <span class="group-count">${escapeHtml(groupStatsText(clubStats))}</span>
+            </button>
+          </div>`,
+          `<div class="all-players-club-body">${renderPlayerHeader()}${clubGroup.errors.map(renderErrorRecord).join("")}${clubGroup.normal.map(renderPlayerRecord).join("")}</div>`
+        ];
+        return `<div class="sync-player-group all-players-club-group${isClubCollapsed ? " collapsed" : ""}">${rows.join("")}</div>`;
+      }).join("");
+      const isLeagueCollapsed = collapsedLeagueGroups.has(leagueGroup.key);
+
+      return `<div class="sync-player-group all-players-league-group${isLeagueCollapsed ? " collapsed" : ""}">
+        <div class="league-group sync-group-header all-players-league-header">
+          <button class="group-toggle all-players-league-toggle" type="button" data-group-key="${escapeHtml(leagueGroup.key)}" aria-expanded="${String(!isLeagueCollapsed)}">
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+            <span class="sync-group-entity">${groupEntityImage(leagueGroup.player.urlImgLeague, leagueGroup.league)}<strong>${escapeHtml(leagueGroup.league)}</strong></span>
+            <span class="group-count">${escapeHtml(groupStatsText({ ...leagueStats, clubs: clubs.length }))}</span>
+          </button>
+        </div>
+        <div class="all-players-league-body">${clubRows}</div>
+      </div>`;
     }).join("");
+}
+
+function aggregateClubStats(clubs = [], state = {}) {
+  return clubs.reduce((stats, club) => {
+    const clubStats = clubGroupStats(club, state);
+    return {
+      records: stats.records + clubStats.records,
+      errors: stats.errors + clubStats.errors,
+      inserted: stats.inserted + clubStats.inserted,
+      updated: stats.updated + clubStats.updated,
+      deleted: stats.deleted + clubStats.deleted
+    };
+  }, { records: 0, errors: 0, inserted: 0, updated: 0, deleted: 0 });
+}
+
+function clubGroupStats(group = {}, state = {}) {
+  const saveStatusStats = (group.normal || []).reduce((stats, record) => {
+    if (record?.saveStatus === "inserted") stats.inserted++;
+    else if (record?.saveStatus === "updated") stats.updated++;
+    return stats;
+  }, { inserted: 0, updated: 0 });
+  const saveResult = currentRunSaveResultForClub(group, state);
+
+  return {
+    records: group.normal?.length || 0,
+    errors: group.errors?.length || 0,
+    inserted: saveResult ? Number(saveResult.inserted) || 0 : saveStatusStats.inserted,
+    updated: saveResult ? Number(saveResult.updated) || 0 : saveStatusStats.updated,
+    deleted: saveResult ? Number(saveResult.deleted) || 0 : 0
+  };
+}
+
+function currentRunSaveResultForClub(group = {}, state = {}) {
+  if (group.clubId == null || !state?.runStartedAt) return null;
+  const groupRunStartedAt = (group.normal || []).find((record) => record?.runStartedAt)?.runStartedAt;
+  if (Number(groupRunStartedAt) !== Number(state.runStartedAt)) return null;
+  return state.clubSaveResults?.[String(group.clubId)] || null;
+}
+
+function groupStatsText(stats = {}) {
+  const parts = [];
+  if (stats.clubs != null) parts.push(`${Number(stats.clubs) || 0} kulüp`);
+  parts.push(`${Number(stats.records) || 0} okunan`);
+  if (Number(stats.inserted)) parts.push(`${Number(stats.inserted)} yeni`);
+  if (Number(stats.updated)) parts.push(`${Number(stats.updated)} güncellendi`);
+  if (Number(stats.deleted)) parts.push(`${Number(stats.deleted)} silindi`);
+  if (Number(stats.errors)) parts.push(`${Number(stats.errors)} hata`);
+  return parts.join(" · ");
 }
 
 function renderPlayerHeader() {
@@ -525,8 +791,8 @@ function renderCoinCardRecord(record) {
   return `<article class="player-data-row sync-row coin-card-row${futbinUrl ? " is-clickable" : ""}"${syncRowLinkAttributes(futbinUrl)} title="${escapeHtml(player.name || "")}">
       ${cardCell}
       ${playerDetails}
-      ${priceCell(player.priceConsole)}
-      ${priceCell(player.pricePc)}
+      ${priceRangeCell(player.priceConsole, player.minPriceConsole, player.maxPriceConsole)}
+      ${priceRangeCell(player.pricePc, player.minPricePc, player.maxPricePc)}
       ${processedDateCell(record.processedAt)}
     </article>`;
 }
@@ -644,19 +910,34 @@ function priceCell(value) {
   return `<div class="grid-cell price-cell" title="${escapeHtml(text)}"><span>${escapeHtml(text)}</span>${coinIcon()}</div>`;
 }
 
+function priceRangeCell(value, minValue, maxValue) {
+  const priceText = formatPrice(value);
+  const rangeText = formatRange(minValue, maxValue);
+  const title = rangeText === "—" ? priceText : `${priceText} · ${rangeText}`;
+  return `<div class="grid-cell price-cell price-range-cell" title="${escapeHtml(title)}">
+    <span class="price-main"><span>${escapeHtml(priceText)}</span>${coinIcon()}</span>
+    <small>${escapeHtml(rangeText)}</small>
+  </div>`;
+}
+
+function formatRange(minValue, maxValue) {
+  const minText = formatPrice(minValue);
+  const maxText = formatPrice(maxValue);
+  return minText === "—" && maxText === "—" ? "—" : `${minText} - ${maxText}`;
+}
+
 function formatPrice(value) {
   if (value === null || value === undefined || value === "") return "—";
   const number = Number(value);
   if (!Number.isFinite(number)) return "—";
 
-  const roundedThousands = Math.round(number / 1_000);
-  if (roundedThousands >= 1_000) {
-    const millions = Math.floor(roundedThousands / 1_000);
-    const thousands = roundedThousands % 1_000;
-    return thousands ? `${millions}M ${thousands}K` : `${millions}M`;
-  }
-  if (roundedThousands >= 1) return `${roundedThousands}K`;
+  if (Math.abs(number) >= 1_000_000) return `${trimPriceDecimal(number / 1_000_000)} M`;
+  if (Math.abs(number) >= 1_000) return `${trimPriceDecimal(number / 1_000)} K`;
   return new Intl.NumberFormat("tr-TR").format(number);
+}
+
+function trimPriceDecimal(value) {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function processedDateCell(value) {

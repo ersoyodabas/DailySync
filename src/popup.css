@@ -19,10 +19,19 @@ header { display:flex; margin:0 0 10px; flex-direction:column; align-items:stret
 .environment-button.active { border-color:#39785b; background:#183729; color:#72e6ad; }
 .environment-button:focus-visible { outline:1px solid #66dca2; outline-offset:1px; }
 .content-tabs { display:flex; min-width:0; flex:1 1 auto; align-items:center; gap:2px; padding-left:6px; border-left:1px solid #252d38; }
-.top-navbar .content-tab { min-width:0; padding:6px 7px; border:1px solid transparent; background:transparent; color:#7f8999; font-size:8px; white-space:nowrap; }
+.content-tab-item { display:flex; min-width:0; align-items:center; gap:2px; border:1px solid transparent; border-radius:7px; }
+.content-tab-item:has(.content-tab.view-active) { border-color:#39785b; background:#183729; box-shadow:inset 0 0 0 1px #72e6ad12; }
+.content-tab-item:has(.content-tab-checkbox:not(:checked)) .content-tab { opacity:.58; }
+.top-navbar .content-tab { min-width:0; padding:6px 4px 6px 6px; border:1px solid transparent; background:transparent; color:#7f8999; font-size:8px; white-space:nowrap; }
 .top-navbar .content-tab:hover { background:#171c24; color:#dce5ef; }
-.top-navbar .content-tab.view-active { border-color:#39785b; background:#183729; color:#72e6ad; box-shadow:inset 0 0 0 1px #72e6ad12; }
+.top-navbar .content-tab.view-active { color:#72e6ad; }
 .top-navbar .content-tab:focus-visible { outline:1px solid #66dca2; outline-offset:1px; }
+.content-tab-active { display:inline-grid; width:16px; height:22px; flex:0 0 auto; place-items:center; padding-right:3px; cursor:pointer; }
+.content-tab-active input { position:absolute; opacity:0; pointer-events:none; }
+.content-tab-active span { display:block; width:10px; height:10px; border:1px solid #3b4656; border-radius:3px; background:#0b0e13; box-shadow:inset 0 0 0 1px #0006; }
+.content-tab-active input:checked + span { border-color:#55d99a; background:#55d99a; box-shadow:0 0 0 2px #55d99a22; }
+.content-tab-active input:checked + span::after { display:block; color:#06120c; font-size:9px; font-weight:900; line-height:9px; text-align:center; content:"✓"; }
+.content-tab-active input:disabled + span { opacity:.35; cursor:not-allowed; }
 .top-navbar .dot { margin:0 4px 0 auto; }
 h1,h2 { margin:2px 0 0; letter-spacing:-.4px; }
 h1 { font-size:19px; } h2 { font-size:18px; }
@@ -120,9 +129,9 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .player-list { padding-bottom:6px; }
 .player-list [hidden] { display:none; }
 .club-player-header,.player-data-row { display:grid; width:calc(100% - 38px); min-width:574px; margin-left:38px; grid-template-columns:44px 150px 34px 34px 42px 42px 42px 42px 72px 72px; align-items:center; }
-.sync-header,.sync-row { width:100%; min-width:446px; margin-left:0; grid-template-columns:34px 100px 34px 46px 42px 36px 36px 34px fit-content(84px); }
+.sync-header,.sync-row { width:100%; min-width:426px; margin-left:0; grid-template-columns:34px 78px 34px 46px 42px 36px 36px 34px minmax(72px,1fr); }
 .sync-header { position:relative; z-index:1; }
-.coin-card-header,.coin-card-row { grid-template-columns:48px 95px minmax(66px,1fr) minmax(66px,1fr) 90px; }
+.coin-card-header,.coin-card-row { grid-template-columns:48px 82px minmax(72px,1fr) minmax(72px,1fr) 90px; }
 .coin-card-row { min-height:48px; }
 .coin-card-row .price-cell { justify-content:flex-end; text-align:right; }
 .cc-card-cell { padding:1px 2px; }
@@ -148,7 +157,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .club-player-header span { padding:2px 4px; text-align:center; }
 .sync-header span:nth-child(2) { text-align:left; }
 .sync-header span:last-child { text-align:right; }
-.sync-header .price-header { display:flex; align-items:center; justify-content:flex-end; gap:4px; }
+.sync-header .price-header { display:flex; align-items:center; justify-content:flex-end; gap:4px; text-align:right; }
 .coin-card-header .date-header { text-align:right; }
 .platform-header-icon { width:13px; height:13px; flex:0 0 auto; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 .playstation-icon { width:12px; height:12px; flex:0 0 auto; fill:currentColor; }
@@ -164,6 +173,36 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .collapsed .chevron { transform:rotate(-90deg); }
 .coin-section-header .group-count { margin-left:auto; }
 .coin-cards-group.collapsed .coin-section-body { display:none; }
+.cycle-group.collapsed .cycle-group-body { display:none; }
+.all-players-league-group.collapsed > .all-players-league-body,
+.all-players-club-group.collapsed > .all-players-club-body { display:none; }
+.cycle-group-body .coin-cards-group { position:relative; margin-left:12px; border-left:1px solid #263846; }
+.cycle-group-body .coin-cards-group::before { position:absolute; top:14px; left:-1px; width:10px; border-top:1px solid #263846; content:""; }
+.cycle-group-body .coin-section-header { padding-left:14px; }
+.cycle-group-body .coin-section-body { border-left:1px solid rgba(38,56,70,.45); }
+.cycle-group-body .all-players-league-group { position:relative; margin-left:10px; border-left:1px solid #263846; }
+.cycle-group-body .all-players-league-group::before { position:absolute; top:14px; left:-1px; width:10px; border-top:1px solid #263846; content:""; }
+.all-players-league-header { padding-left:14px; }
+.all-players-league-body { border-left:1px solid rgba(38,56,70,.45); }
+.all-players-club-group { position:relative; margin-left:14px; border-left:1px solid #2f4138; }
+.all-players-club-group::before { position:absolute; top:13px; left:-1px; width:11px; border-top:1px solid #2f4138; content:""; }
+.all-players-club-header { padding-left:15px; background:#151f1b; }
+.all-players-club-body { border-left:1px solid rgba(47,65,56,.42); }
+.all-players-league-toggle,
+.all-players-club-toggle { min-width:0; align-items:center; gap:6px; }
+.all-players-league-header .sync-group-entity,
+.all-players-club-header .sync-group-entity { overflow:hidden; }
+.all-players-league-header strong,
+.all-players-club-header strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.all-players-league-header .group-count,
+.all-players-club-header .group-count { max-width:62%; margin-left:auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.all-players-club-body .club-player-header,
+.all-players-club-body .player-data-row { width:calc(100% - 10px); margin-left:10px; }
+.cycle-group-header { border-top-color:#4d6a93; background:linear-gradient(90deg,#1a2f45,#162337); color:#e8f3ff; }
+.cycle-group-header:hover { background:linear-gradient(90deg,#203952,#192a40); }
+.cycle-group-header .group-count { margin-left:auto; }
+.cycle-current-badge { margin-left:8px; padding:1px 5px; border:1px solid #4fae82; border-radius:999px; background:#173627; color:#77e6ad; font-size:8px; font-weight:850; letter-spacing:.3px; white-space:nowrap; }
+.cycle-current-badge + .group-count { margin-left:auto; }
 .coin-section-empty { padding:18px 10px; border-bottom:1px solid #1e252e; background:#0d1117; color:#687181; font-size:10px; text-align:center; }
 .group-icon { display:inline-grid; width:23px; height:23px; margin-right:8px; place-items:center; vertical-align:middle; border:1px solid #3d7058; border-radius:7px; background:#204b38; color:#75e3aa; }
 .group-icon.club { width:20px; height:20px; border-color:#3d5148; background:#23342c; color:#9ab8a8; }
@@ -186,10 +225,15 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .player-data-row.is-clickable:hover { background:#19291f; box-shadow:inset 3px 0 #5add9f; }
 .player-data-row.is-clickable:focus-visible { outline:1px solid #62dfa2; outline-offset:-1px; background:#19291f; }
 .grid-cell { min-width:0; height:100%; padding:2px 3px; border-right:1px solid #1e252e; color:#d9e0e9; font-size:9px; line-height:15px; overflow:hidden; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
-.player-cell { width:100px; max-width:100px; color:#f1f4f8; font-size:10px; font-weight:750; text-align:left; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
+.player-cell { width:78px; max-width:78px; color:#f1f4f8; font-size:10px; font-weight:750; text-align:left; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
 .position-cell { color:#6de0a5; font-weight:800; }
 .rating-cell { color:#d9e0e9; font-size:10px; font-weight:750; }
 .price-cell { display:flex; align-items:center; justify-content:flex-end; justify-self:stretch; gap:5px; color:#f2cf6b; font-weight:750; font-variant-numeric:tabular-nums; line-height:1; text-align:right; }
+.sync-row .price-cell,
+.coin-card-row .price-cell { padding-right:6px; border-right:0; justify-content:flex-end; text-align:right; }
+.price-range-cell { align-items:flex-end; flex-direction:column; justify-content:center; gap:2px; line-height:1.05; }
+.price-range-cell .price-main { display:inline-flex; align-items:center; justify-content:flex-end; gap:4px; }
+.price-range-cell small { display:block; max-width:100%; overflow:hidden; color:#9aa6b6; font-size:7px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
 .coin-icon { width:12px; height:12px; flex:0 0 auto; fill:#d7a928; stroke:#fff0a8; stroke-width:1.5; }
 .icon-cell { display:flex; align-items:center; justify-content:center; gap:2px; padding:1px; line-height:1; }
 .icon-cell img { width:20px; height:20px; border-radius:3px; object-fit:contain; }

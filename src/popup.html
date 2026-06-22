@@ -28,13 +28,31 @@
     </div>
 
     <div class="content-tabs" role="tablist" aria-label="İçerik">
-      <button class="content-tab view-active" type="button" role="tab" aria-selected="true"
-        data-content="web-app-sync" data-list="web-app-sync" data-operations="">Web App Sync</button>
-      <button class="content-tab" type="button" role="tab" aria-selected="false"
-        data-content="coin-cards" data-list="coin-cards" data-operations="coin-cards">Futbin
-        Latest Coin Cards</button>
-      <button class="content-tab" type="button" role="tab" aria-selected="false"
-        data-content="club-players" data-list="club-players" data-operations="club-players">Futbin All Players</button>
+      <div class="content-tab-item">
+        <button class="content-tab view-active" type="button" role="tab" aria-selected="true"
+          data-content="web-app-sync" data-list="web-app-sync" data-operations="">Web App Sync</button>
+        <label class="content-tab-active" title="Bu içerik için sync operasyonu henüz yok">
+          <input class="content-tab-checkbox" type="checkbox" data-content-active="web-app-sync" disabled>
+          <span aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="content-tab-item">
+        <button class="content-tab" type="button" role="tab" aria-selected="false"
+          data-content="coin-cards" data-list="coin-cards" data-operations="coin-cards">Futbin
+          Latest Coin Cards</button>
+        <label class="content-tab-active" title="Bu tab run edilsin">
+          <input class="content-tab-checkbox" type="checkbox" data-content-active="coin-cards" checked>
+          <span aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="content-tab-item">
+        <button class="content-tab" type="button" role="tab" aria-selected="false"
+          data-content="club-players" data-list="club-players" data-operations="club-players">Futbin All Players</button>
+        <label class="content-tab-active" title="Bu tab run edilsin">
+          <input class="content-tab-checkbox" type="checkbox" data-content-active="club-players" checked>
+          <span aria-hidden="true"></span>
+        </label>
+      </div>
     </div>
 
     <span id="statusDot" class="dot" aria-label="Senkronizasyon durumu"></span>
