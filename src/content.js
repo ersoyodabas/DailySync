@@ -32,7 +32,7 @@ async function collectAndPublish(message) {
       await collectCoinCardAndPublish(message);
       return;
     }
-    await waitForPlayerRows(5000);
+    await waitForPlayerRows(60000);
     if (Number(message.page) === 1 && message.operation !== "coin-cards") validateSelectedFilters(message.job);
     const rows = [...document.querySelectorAll("tr.player-row, .player-row")];
     const errors = [];
@@ -71,7 +71,7 @@ async function collectAndPublish(message) {
 }
 
 async function collectLatestCoinCardsAndPublish(message) {
-  await waitForPlayerRows(5000);
+  await waitForPlayerRows(60000);
   const rows = [...document.querySelectorAll("table.players-table tr.player-row, tr.player-row")];
   const sourceDate = normalize(rows[0]?.querySelector(".table-added-on")?.textContent) || null;
   const errors = [];
