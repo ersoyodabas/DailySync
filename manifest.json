@@ -3,10 +3,12 @@
   "name": "Futbin Player Monitor",
   "version": "0.3.0",
   "description": "Backend kuyruğundaki lig ve kulüplerin Futbin oyuncularını tarayıp senkronize eder.",
-  "permissions": ["storage", "tabs", "alarms"],
+  "permissions": ["storage", "tabs", "alarms", "debugger"],
   "host_permissions": [
     "https://www.futbin.com/*",
     "https://futbin.com/*",
+    "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*",
+    "https://signin.ea.com/*",
     "http://localhost:5055/*",
     "https://api.sbcmonster.com/*"
   ],
@@ -23,6 +25,22 @@
       "matches": ["https://www.futbin.com/*", "https://futbin.com/*"],
       "js": ["src/content.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*", "https://signin.ea.com/*"],
+      "js": [
+        "src/actions/webAppSync/app.js",
+        "src/actions/webAppSync/sync_rarity.js",
+        "src/actions/webAppSync/sync_sbc.js",
+        "src/actions/webAppSync/core.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [".env"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

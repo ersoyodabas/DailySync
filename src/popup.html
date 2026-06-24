@@ -30,9 +30,9 @@
     <div class="content-tabs" role="tablist" aria-label="İçerik">
       <div class="content-tab-item">
         <button class="content-tab view-active" type="button" role="tab" aria-selected="true"
-          data-content="web-app-sync" data-list="web-app-sync" data-operations="">Web App Sync</button>
-        <label class="content-tab-active" title="Bu içerik için sync operasyonu henüz yok">
-          <input class="content-tab-checkbox" type="checkbox" data-content-active="web-app-sync" disabled>
+          data-content="web-app-sync" data-list="web-app-sync" data-operations="web-app-sync">Web App Sync</button>
+        <label class="content-tab-active" title="Bu tab run edilsin">
+          <input class="content-tab-checkbox" type="checkbox" data-content-active="web-app-sync" checked>
           <span aria-hidden="true"></span>
         </label>
       </div>
@@ -121,7 +121,7 @@
           <div><b id="skippedCount">0</b><small>Skip</small></div>
         </div>
         <div class="logs">
-          <div class="logs-head"><span class="eyebrow">REQUEST URL LOGS</span><small id="logCount">0 kayıt</small></div>
+          <div class="logs-head"><span id="logTitle" class="eyebrow">REQUEST URL LOGS</span><small id="logCount">0 kayıt</small></div>
           <div id="errorLogs" class="error-logs" hidden></div>
           <div id="logs" class="logs-list">
             <div class="logs-empty">Henüz request gönderilmedi.</div>
@@ -130,6 +130,9 @@
       </section>
     </aside>
   </main>
+  <script src="actions/webAppSync/app.js"></script>
+  <script src="actions/futbinLatestCoinCards.js"></script>
+  <script src="actions/futbinAllPlayers.js"></script>
   <script src="popup.js"></script>
 </body>
 

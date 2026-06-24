@@ -129,6 +129,7 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .player-list { padding-bottom:6px; }
 .player-list [hidden] { display:none; }
 .club-player-header,.player-data-row { display:grid; width:calc(100% - 38px); min-width:574px; margin-left:38px; grid-template-columns:44px 150px 34px 34px 42px 42px 42px 42px 72px 72px; align-items:center; }
+.web-app-sync-header,.web-app-sync-row { grid-template-columns:70px 220px 70px 90px 90px; }
 .sync-header,.sync-row { width:100%; min-width:426px; margin-left:0; grid-template-columns:34px 78px 34px 46px 42px 36px 36px 34px minmax(72px,1fr); }
 .sync-header { position:relative; z-index:1; }
 .coin-card-header,.coin-card-row { grid-template-columns:48px 82px minmax(72px,1fr) minmax(72px,1fr) 90px; }

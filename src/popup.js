@@ -18,6 +18,7 @@ const elements = {
   deletedCount: $("#deletedCount"),
   skippedCount: $("#skippedCount"),
   logCount: $("#logCount"),
+  logTitle: $("#logTitle"),
   errorLogs: $("#errorLogs"),
   logs: $("#logs"),
   records: $("#records"),
@@ -30,6 +31,7 @@ const elements = {
 };
 
 let currentState = {};
+let currentRootState = {};
 let currentRecords = [];
 let currentLogs = [];
 let currentErrors = [];
@@ -41,6 +43,7 @@ const collapsedCycleGroups = new Set();
 const expandedCycleGroups = new Set();
 const collapsedLeagueGroups = new Set();
 const collapsedClubGroups = new Set();
+const actionRegistry = window.FutbinSyncActions || {};
 init();
 setInterval(renderCountdown, 250);
 
@@ -58,7 +61,7 @@ elements.start.addEventListener("click", async () => {
   showError();
   const operations = allSyncOperations();
   if (!operations.length) {
-    showError("Bu sekmeye bağlı senkronizasyon işlemi bulunamadı.");
+    showError("En az bir senkronizasyon işlemi seçilmelidir.");
     return;
   }
   if (currentState.queue?.length && !currentState.running && currentState.currentJobIndex >= 0) {
@@ -81,7 +84,7 @@ elements.start.addEventListener("click", async () => {
 });
 
 elements.stop.addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "STOP_SYNC" });
+  await chrome.runtime.sendMessage({ type: "STOP_SYNC", operations: allSyncOperations() });
   elements.start.style.display = "";
   elements.stop.style.display = "none";
 });
@@ -107,25 +110,21 @@ elements.contentTabs.forEach((tab) => {
       syncContentTab: tab.dataset.content,
       syncListTab: currentListTab
     });
-    render(currentState, currentRecords, currentLogs, currentErrors);
+    render(currentRootState, currentRecords, currentLogs, currentErrors);
   });
 });
 
 elements.contentTabCheckboxes.forEach((checkbox) => {
   checkbox.addEventListener("change", async () => {
     await saveSettings();
-    render(currentState, currentRecords, currentLogs, currentErrors);
+    render(currentRootState, currentRecords, currentLogs, currentErrors);
   });
 });
 
 function setListTab(listName, title) {
   currentListTab = listName || "web-app-sync";
   if (elements.listTitle) {
-    elements.listTitle.textContent = title || (currentListTab === "coin-cards"
-      ? "Futbin Latest Coin Cards"
-      : currentListTab === "club-players"
-        ? "Futbin All Players"
-        : "Web App Sync");
+    elements.listTitle.textContent = title || currentAction().defaultTitle || "Web App Sync";
   }
 }
 
@@ -179,39 +178,7 @@ elements.records.addEventListener("click", (event) => {
     }
     return;
   }
-  const leagueToggle = event.target.closest(".all-players-league-toggle");
-  if (leagueToggle) {
-    const groupKey = leagueToggle.dataset.groupKey;
-    const group = leagueToggle.closest(".all-players-league-group");
-    const willCollapse = !group.classList.contains("collapsed");
-    group.classList.toggle("collapsed", willCollapse);
-    leagueToggle.setAttribute("aria-expanded", String(!willCollapse));
-    if (willCollapse) collapsedLeagueGroups.add(groupKey);
-    else collapsedLeagueGroups.delete(groupKey);
-    return;
-  }
-  const clubToggle = event.target.closest(".all-players-club-toggle");
-  if (clubToggle) {
-    const groupKey = clubToggle.dataset.groupKey;
-    const group = clubToggle.closest(".all-players-club-group");
-    const willCollapse = !group.classList.contains("collapsed");
-    group.classList.toggle("collapsed", willCollapse);
-    clubToggle.setAttribute("aria-expanded", String(!willCollapse));
-    if (willCollapse) collapsedClubGroups.add(groupKey);
-    else collapsedClubGroups.delete(groupKey);
-    return;
-  }
-  const toggle = event.target.closest(".coin-section-toggle");
-  if (toggle) {
-    const sectionName = toggle.dataset.section;
-    const section = toggle.closest(".coin-cards-group");
-    const willCollapse = !section.classList.contains("collapsed");
-    section.classList.toggle("collapsed", willCollapse);
-    toggle.setAttribute("aria-expanded", String(!willCollapse));
-    if (willCollapse) collapsedCoinSections.add(sectionName);
-    else collapsedCoinSections.delete(sectionName);
-    return;
-  }
+  if (currentAction().handleRecordClick?.(event, actionContext())) return;
   openSyncRow(event);
 });
 elements.records.addEventListener("keydown", (event) => {
@@ -240,6 +207,10 @@ async function saveSettings() {
 
 function selectedOperations() {
   if (!isContentTabActive(currentContentTab)) return [];
+  return currentTabOperations();
+}
+
+function currentTabOperations() {
   return (selectedContentTab()?.dataset.operations || "")
     .split(",")
     .map((operation) => operation.trim())
@@ -304,18 +275,57 @@ function setApiEnvironment(apiBaseUrl) {
   });
 }
 
+function currentAction() {
+  return actionRegistry[currentListTab] || actionRegistry["web-app-sync"];
+}
+
+function actionContext() {
+  return {
+    elements,
+    helpers: actionHelpers(),
+    collapsedCoinSections,
+    collapsedLeagueGroups,
+    collapsedClubGroups
+  };
+}
+
+function actionHelpers() {
+  return {
+    assetCell,
+    cell,
+    consolePlatformIcon,
+    cycleKeyForEntry,
+    escapeHtml,
+    imageCell,
+    isCoinCardEntry,
+    isCoinCardJob,
+    pcPlatformIcon,
+    playstationIcon,
+    priceCell,
+    priceRangeCell,
+    processedDateCell,
+    renderCycleGroups,
+    renderErrorRecord,
+    safeFutbinUrl,
+    syncRowLinkAttributes
+  };
+}
+
 function render(state = {}, records = [], logs = [], errors = []) {
-  const viewState = stateForCurrentView(state);
+  currentRootState = state;
+  const action = currentAction();
+  const helpers = actionHelpers();
+  const viewState = action.stateForView(state);
   const nonSkippedErrors = errors.filter((entry) => !isSkippedErrorEntry(entry));
-  const displayLogs = logs.filter(entryMatchesCurrentView);
-  const displayErrors = nonSkippedErrors.filter(entryMatchesCurrentView);
+  const displayLogs = logs.filter((entry) => action.entryMatches(entry, helpers));
+  const displayErrors = nonSkippedErrors.filter((entry) => action.entryMatches(entry, helpers));
   currentState = viewState;
   currentRecords = records;
   currentLogs = logs;
   currentErrors = nonSkippedErrors;
-  const visibleQueue = queueForCurrentView(viewState.queue || []);
+  const visibleQueue = (viewState.queue || []).filter((job) => action.jobMatches(job, helpers));
   const currentJob = viewState.queue?.[viewState.currentJobIndex];
-  const activeJob = jobMatchesCurrentView(currentJob) ? currentJob : null;
+  const activeJob = action.jobMatches(currentJob, helpers) ? currentJob : null;
   const completedVisibleJobs = visibleQueue
     .filter((job) => (viewState.queue || []).indexOf(job) < viewState.currentJobIndex)
     .length;
@@ -323,13 +333,10 @@ function render(state = {}, records = [], logs = [], errors = []) {
     ? visibleQueue.findIndex((job) => job === activeJob) + 1
     : Math.min(completedVisibleJobs, visibleQueue.length);
   const totalJobs = visibleQueue.length;
-  const currentPlayers = activeJob
-    ? activeJob.operation === "coin-card-latest"
-      ? viewState.currentLatest?.cards?.length || 0
-      : Object.keys(viewState.currentPlayers || {}).length
-    : 0;
+  const currentPlayers = action.currentPlayers(viewState, activeJob);
+  if (elements.logTitle) elements.logTitle.textContent = action.logTitle || "REQUEST URL LOGS";
 
-  elements.status.textContent = !hasSyncContentView()
+  elements.status.textContent = !action.hasSyncContent
     ? "İçerik henüz hazır değil"
     : activeJob
       ? viewState.status || "Hazır"
@@ -337,8 +344,10 @@ function render(state = {}, records = [], logs = [], errors = []) {
         ? currentJobNumber >= totalJobs
           ? "Bu sekmedeki işler tamamlandı"
           : "Bu sekmedeki işler sırada bekliyor"
-        : "Hazır";
-  elements.dot.classList.toggle("running", Boolean(viewState.running && hasSyncContentView()));
+        : viewState.nextRunAt
+          ? viewState.status || "Planlı çalışma bekleniyor"
+          : "Hazır";
+  elements.dot.classList.toggle("running", Boolean(viewState.running && action.hasSyncContent));
   elements.progress.style.width = totalJobs ? `${Math.min(100, currentJobNumber / totalJobs * 100)}%` : "0%";
   elements.clubCount.textContent = `${Math.min(currentJobNumber, totalJobs)} / ${totalJobs}`;
   elements.pageCount.textContent = activeJob ? `${viewState.currentPage || 0} / ${viewState.totalPages || 0}` : "0 / 0";
@@ -346,7 +355,7 @@ function render(state = {}, records = [], logs = [], errors = []) {
   if (elements.runCount) elements.runCount.textContent = viewState.runCount || 0;
 
   const saveTotals = Object.entries(viewState.clubSaveResults || {}).reduce((totals, [key, result]) => {
-    if (!saveResultMatchesCurrentView(key)) return totals;
+    if (!action.saveResultMatches(key)) return totals;
 
     return {
       inserted: totals.inserted + (Number(result?.inserted) || 0),
@@ -355,27 +364,15 @@ function render(state = {}, records = [], logs = [], errors = []) {
     };
   }, { inserted: 0, updated: 0, deleted: 0 });
   if (elements.clubCount.nextElementSibling) {
-    elements.clubCount.nextElementSibling.textContent = currentListTab === "coin-cards"
-      ? "Cards"
-      : currentListTab === "club-players"
-        ? "Club"
-        : "Content";
+    elements.clubCount.nextElementSibling.textContent = action.statLabel || "Content";
   }
 
   elements.insertedCount.textContent = saveTotals.inserted;
   elements.updatedCount.textContent = saveTotals.updated;
   elements.deletedCount.textContent = saveTotals.deleted;
-  elements.skippedCount.textContent = skippedCountForCurrentView(viewState, activeJob);
-  elements.currentClub.textContent = activeJob
-    ? isCoinCardJob(activeJob)
-      ? activeJob.label || "Coin Cards"
-      : `${activeJob.league_name} / ${activeJob.club_name}`
-    : viewState.running && totalJobs
-      ? currentJobNumber >= totalJobs
-        ? "Bu sekme tamamlandı"
-        : "Sırada bekliyor"
-      : "İş bekleniyor";
-  if (state.running) {
+  elements.skippedCount.textContent = action.skippedCount(viewState, activeJob);
+  elements.currentClub.textContent = action.currentJobLabel({ activeJob, viewState, currentJobNumber, totalJobs });
+  if (viewState.running || viewState.userStarted) {
     elements.start.style.display = "none";
     elements.stop.style.display = "";
     elements.stop.removeAttribute("hidden");
@@ -383,29 +380,32 @@ function render(state = {}, records = [], logs = [], errors = []) {
     elements.start.style.display = "";
     elements.stop.style.display = "none";
   }
-  elements.start.disabled = Boolean(state.running) || !allSyncOperations().length;
-  elements.stop.disabled = !state.running;
-  elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(state.running); });
+  elements.start.disabled = Boolean(viewState.running || viewState.userStarted) || !allSyncOperations().length;
+  elements.stop.disabled = !viewState.running && !viewState.userStarted;
+  elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(viewState.running || viewState.userStarted); });
   elements.contentTabCheckboxes.forEach((checkbox) => {
     const hasOperation = contentTabHasOperation(checkbox.dataset.contentActive);
-    checkbox.disabled = Boolean(state.running) || !hasOperation;
+    checkbox.disabled = !hasOperation;
   });
-  elements.waitMs.disabled = Boolean(state.running);
+  elements.waitMs.disabled = Boolean(viewState.running || viewState.userStarted);
   showError(viewState.error || "");
   renderCountdown();
-  renderRecords(records, displayErrors, viewState);
+  action.renderRecords({
+    records,
+    errors: displayErrors,
+    state: viewState,
+    elements,
+    helpers,
+    collapsedCoinSections,
+    collapsedLeagueGroups,
+    collapsedClubGroups
+  });
   renderLogs(displayLogs, displayErrors);
 }
 
 function isSkippedErrorEntry(entry) {
   const message = String(entry?.message || "").toLocaleLowerCase("tr-TR");
   return message.includes("atlandı") || message.includes("atlandi");
-}
-
-function stateForCurrentView(state = {}) {
-  if (currentListTab === "coin-cards") return state.runs?.["coin-cards"] || state;
-  if (currentListTab === "club-players") return state.runs?.["club-players"] || state;
-  return state;
 }
 
 function isCoinCardJob(job) {
@@ -420,95 +420,42 @@ function isCoinCardEntry(entry) {
   );
 }
 
-function hasSyncContentView() {
-  return currentListTab === "coin-cards" || currentListTab === "club-players";
-}
-
-function jobMatchesCurrentView(job) {
-  if (!job || !hasSyncContentView()) return false;
-  const isCoinCard = isCoinCardJob(job);
-  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
-}
-
-function entryMatchesCurrentView(entry) {
-  if (!hasSyncContentView()) return false;
-  const isCoinCard = isCoinCardEntry(entry);
-  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
-}
-
-function queueForCurrentView(queue) {
-  return (queue || []).filter(jobMatchesCurrentView);
-}
-
-function saveResultMatchesCurrentView(key) {
-  if (!hasSyncContentView()) return false;
-  const isCoinCard = String(key).startsWith("coin-card:");
-  return currentListTab === "coin-cards" ? isCoinCard : !isCoinCard;
-}
-
-function skippedCountForCurrentView(state, activeJob) {
-  const savedSkipped = Object.entries(state.clubSaveResults || {})
-    .filter(([key]) => saveResultMatchesCurrentView(key))
-    .reduce((total, [, result]) => total + (Number(result?.skipped) || 0), 0);
-  return savedSkipped + (activeJob ? Number(state.currentSkipped) || 0 : 0);
-}
-
 function canResume(state) {
   return Boolean(!state.running && state.queue?.length && state.currentJobIndex >= 0 && state.currentJobIndex < state.queue.length && !String(state.status || "").startsWith("Tamamlandı"));
 }
 
 function renderCountdown() {
-  if (!hasSyncContentView()) {
+  if (!currentAction().hasSyncContent) {
     elements.countdown.textContent = "İçerik yok";
     return;
   }
-  if (!currentState.running) {
-    elements.countdown.textContent = canResume(currentState) ? "Devam etmeye hazır" : "Bekliyor";
-    return;
+  if (currentListTab === "web-app-sync") {
+    const isActive = isContentTabActive("web-app-sync");
+    const isRunningOrStarted = currentState.running || currentState.userStarted;
+    if (!isActive || !isRunningOrStarted) {
+      elements.countdown.textContent = "Bekliyor";
+      return;
+    }
   }
-  if (!currentState.nextRunAt) {
-    elements.countdown.textContent = "İşleniyor…";
-    return;
-  }
-  const remaining = Math.max(0, currentState.nextRunAt - Date.now());
-  if (remaining <= 0) {
-    elements.countdown.textContent = "Şimdi…";
-  } else {
+  if (currentState.nextRunAt) {
+    const remaining = Math.max(0, currentState.nextRunAt - Date.now());
+    if (remaining <= 0) {
+      elements.countdown.textContent = "Şimdi…";
+      return;
+    }
     const totalSeconds = Math.ceil(remaining / 1000);
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
 
-    if (hours > 0) {
-      elements.countdown.textContent = `${hours}s ${minutes}d ${seconds}s`;
-    } else if (minutes > 0) {
-      elements.countdown.textContent = `${minutes}dk ${seconds}sn`;
-    } else {
-      elements.countdown.textContent = `${seconds} saniye`;
-    }
-  }
-}
-
-function renderRecords(records, errors = [], state = {}) {
-  if (!hasSyncContentView()) {
-    elements.records.innerHTML = '<div class="empty">Web App Sync içeriği henüz hazır değil.</div>';
+    elements.countdown.textContent = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
     return;
   }
-
-  const coinRecords = records.filter(isCoinCardEntry);
-  const clubRecords = records.filter((record) => !isCoinCardEntry(record));
-  const coinErrors = errors.filter(isCoinCardEntry);
-  const clubErrors = errors.filter((entry) => !isCoinCardEntry(entry));
-
-  if (currentListTab === "coin-cards") {
-    elements.records.innerHTML = renderCycleGroups(coinRecords, coinErrors, state, (cycleRecords, cycleErrors) =>
-      renderCoinCardSections(cycleRecords, cycleErrors, true));
+  if (!currentState.running && !currentState.userStarted) {
+    elements.countdown.textContent = canResume(currentState) ? "Devam etmeye hazır" : "Bekliyor";
     return;
   }
-
-  elements.records.innerHTML = renderCycleGroups(clubRecords, clubErrors, state, (cycleRecords, cycleErrors) =>
-    renderClubPlayerGroups(cycleRecords, cycleErrors, state)) ||
-    '<div class="empty">Bu sekmede henüz oyuncu verisi yok.</div>';
+  elements.countdown.textContent = "İşleniyor…";
 }
 
 function renderCycleGroups(records, errors = [], state = {}, renderBody) {
@@ -541,7 +488,7 @@ function cycleGroups(records = [], errors = []) {
     if (!groups.has(key)) {
       groups.set(key, {
         key,
-        label: cycleLabelForKey(key),
+        label: cycleLabelForEntry(entry, key),
         records: [],
         errors: [],
         sortAt: cycleTimeForEntry(entry)
@@ -561,27 +508,29 @@ function cycleGroupCollapsed(cycleKey, currentKey) {
 }
 
 function cycleKeyFromState(state = {}) {
-  return cycleKeyFromTime(state.runStartedAt || state.updatedAt || Date.now());
+  return cycleKeyFromTime(state.runStartedAt || state.updatedAt || Date.now(), state.runCount);
 }
 
 function cycleKeyForEntry(entry = {}) {
-  return cycleKeyFromTime(cycleTimeForEntry(entry));
+  return cycleKeyFromTime(cycleTimeForEntry(entry), entry.runCount);
 }
 
 function cycleTimeForEntry(entry = {}) {
   return Number(entry.runStartedAt || entry.capturedAt || entry.processedAt || entry.occurredAt || entry.requestedAt || Date.now());
 }
 
-function cycleKeyFromTime(value) {
-  const date = new Date(Number(value) || Date.now());
-  date.setSeconds(0, 0);
-  return String(date.getTime());
+function cycleKeyFromTime(value, runCount = null) {
+  const time = Number(value) || Date.now();
+  const count = Number(runCount) || 0;
+  return count > 0 ? `${count}:${time}` : String(time);
 }
 
-function cycleLabelForKey(key) {
-  const date = new Date(Number(key));
+function cycleLabelForEntry(entry = {}, key = "") {
+  const runCount = Number(entry.runCount) || 0;
+  const date = new Date(cycleTimeForEntry(entry) || Number(String(key).split(":").pop()));
   if (Number.isNaN(date.getTime())) return "Çalışma turu";
-  return `Çalışma turu · ${new Intl.DateTimeFormat("tr-TR", {
+  const prefix = runCount > 0 ? `${runCount}. çalışma turu` : "Çalışma turu";
+  return `${prefix} · ${new Intl.DateTimeFormat("tr-TR", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
@@ -589,232 +538,6 @@ function cycleLabelForKey(key) {
     minute: "2-digit",
     hour12: false
   }).format(date)}`;
-}
-
-function renderCoinCardSections(records, errors = [], showEmpty = true) {
-  if (!showEmpty && !records.length && !errors.length) return "";
-
-  const inserted = records.filter((r) => r.saveStatus === "inserted");
-  const updated = records.filter((r) => r.saveStatus !== "inserted");
-
-  const makeSection = (sectionName, label, records, errors = [], extraClass = "") => {
-    const countText = `${records.length} kart`;
-    const isCollapsed = collapsedCoinSections.has(sectionName);
-    const rows = records.length || errors.length
-      ? `${records.length ? renderCoinCardHeader() : ""}${errors.map(renderErrorRecord).join("")}${records.map(renderCoinCardRecord).join("")}`
-      : '<div class="coin-section-empty">Henüz kayıt yok.</div>';
-    return `<div class="sync-player-group coin-cards-group ${extraClass}${isCollapsed ? " collapsed" : ""}">
-      <div class="league-group sync-group-header coin-section-header">
-        <button class="group-toggle coin-section-toggle" type="button" data-section="${escapeHtml(sectionName)}" aria-expanded="${String(!isCollapsed)}">
-          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
-          <span class="sync-group-entity"><strong>${escapeHtml(label)}</strong></span>
-          <span class="group-count">${escapeHtml(countText)}</span>
-        </button>
-      </div>
-      <div class="coin-section-body">${rows}</div>
-    </div>`;
-  };
-
-  return makeSection("inserted", "Yeni Kartlar", inserted, [], "section-inserted") +
-    makeSection("updated", "Güncellenen Kartlar", updated, errors.slice(0, 300), "section-updated");
-}
-
-function renderClubPlayerGroups(records, errors = [], state = {}) {
-  if (!records.length && !errors.length) return "";
-
-  const leagueGroups = new Map();
-  const ensureLeagueGroup = (leagueName, sourceEntry = {}) => {
-    const league = String(leagueName || "Lig").trim() || "Lig";
-    const key = `${cycleKeyForEntry(sourceEntry)}:league:${league}`;
-    if (!leagueGroups.has(key)) {
-      leagueGroups.set(key, { key, league, clubs: new Map(), normal: [], errors: [], player: {} });
-    }
-    return leagueGroups.get(key);
-  };
-  const ensureClubGroup = (leagueName, clubName, clubId, sourceEntry = {}) => {
-    const leagueGroup = ensureLeagueGroup(leagueName, sourceEntry);
-    const club = String(clubName || "Kulüp").trim() || "Kulüp";
-    const key = `${leagueGroup.league}\u0000${clubId || club}`;
-    if (!leagueGroup.clubs.has(key)) {
-      leagueGroup.clubs.set(key, {
-        key: `${leagueGroup.key}:club:${clubId || club}`,
-        league: leagueGroup.league,
-        club,
-        clubId,
-        normal: [],
-        errors: [],
-        player: {}
-      });
-    }
-    return leagueGroup.clubs.get(key);
-  };
-
-  records.slice(0, 500).forEach((record) => {
-    const group = ensureClubGroup(
-      record?.leagueName || record?.job?.league_name,
-      record?.clubName || record?.job?.club_name,
-      record?.job?.club_id || record?.clubId,
-      record
-    );
-    group.normal.push(record);
-    const player = record?.player || {};
-    if (!group.player.urlImgLeague && player.urlImgLeague) group.player.urlImgLeague = player.urlImgLeague;
-    if (!group.player.urlImgClub && player.urlImgClub) group.player.urlImgClub = player.urlImgClub;
-    const leagueGroup = ensureLeagueGroup(group.league, record);
-    leagueGroup.normal.push(record);
-    if (!leagueGroup.player.urlImgLeague && player.urlImgLeague) leagueGroup.player.urlImgLeague = player.urlImgLeague;
-  });
-  errors.slice(0, 300).forEach((entry) => {
-    const group = ensureClubGroup(entry?.leagueName, entry?.clubName, entry?.clubId, entry);
-    group.errors.push(entry);
-    ensureLeagueGroup(group.league, entry).errors.push(entry);
-  });
-
-  return [...leagueGroups.values()]
-    .sort((left, right) => left.league.localeCompare(right.league, "tr"))
-    .map((leagueGroup) => {
-      const clubs = [...leagueGroup.clubs.values()]
-        .sort((left, right) => left.club.localeCompare(right.club, "tr"));
-      const leagueStats = aggregateClubStats(clubs, state);
-      const clubRows = clubs.map((clubGroup) => {
-        const clubStats = clubGroupStats(clubGroup, state);
-        const isClubCollapsed = collapsedClubGroups.has(clubGroup.key);
-        const rows = [
-          `<div class="club-group sync-group-header all-players-club-header">
-            <button class="group-toggle all-players-club-toggle" type="button" data-group-key="${escapeHtml(clubGroup.key)}" aria-expanded="${String(!isClubCollapsed)}">
-              <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
-              <span class="sync-group-entity">${groupEntityImage(clubGroup.player.urlImgClub, clubGroup.club)}<strong>${escapeHtml(clubGroup.club)}</strong></span>
-              <span class="group-count">${escapeHtml(groupStatsText(clubStats))}</span>
-            </button>
-          </div>`,
-          `<div class="all-players-club-body">${renderPlayerHeader()}${clubGroup.errors.map(renderErrorRecord).join("")}${clubGroup.normal.map(renderPlayerRecord).join("")}</div>`
-        ];
-        return `<div class="sync-player-group all-players-club-group${isClubCollapsed ? " collapsed" : ""}">${rows.join("")}</div>`;
-      }).join("");
-      const isLeagueCollapsed = collapsedLeagueGroups.has(leagueGroup.key);
-
-      return `<div class="sync-player-group all-players-league-group${isLeagueCollapsed ? " collapsed" : ""}">
-        <div class="league-group sync-group-header all-players-league-header">
-          <button class="group-toggle all-players-league-toggle" type="button" data-group-key="${escapeHtml(leagueGroup.key)}" aria-expanded="${String(!isLeagueCollapsed)}">
-            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
-            <span class="sync-group-entity">${groupEntityImage(leagueGroup.player.urlImgLeague, leagueGroup.league)}<strong>${escapeHtml(leagueGroup.league)}</strong></span>
-            <span class="group-count">${escapeHtml(groupStatsText({ ...leagueStats, clubs: clubs.length }))}</span>
-          </button>
-        </div>
-        <div class="all-players-league-body">${clubRows}</div>
-      </div>`;
-    }).join("");
-}
-
-function aggregateClubStats(clubs = [], state = {}) {
-  return clubs.reduce((stats, club) => {
-    const clubStats = clubGroupStats(club, state);
-    return {
-      records: stats.records + clubStats.records,
-      errors: stats.errors + clubStats.errors,
-      inserted: stats.inserted + clubStats.inserted,
-      updated: stats.updated + clubStats.updated,
-      deleted: stats.deleted + clubStats.deleted
-    };
-  }, { records: 0, errors: 0, inserted: 0, updated: 0, deleted: 0 });
-}
-
-function clubGroupStats(group = {}, state = {}) {
-  const saveStatusStats = (group.normal || []).reduce((stats, record) => {
-    if (record?.saveStatus === "inserted") stats.inserted++;
-    else if (record?.saveStatus === "updated") stats.updated++;
-    return stats;
-  }, { inserted: 0, updated: 0 });
-  const saveResult = currentRunSaveResultForClub(group, state);
-
-  return {
-    records: group.normal?.length || 0,
-    errors: group.errors?.length || 0,
-    inserted: saveResult ? Number(saveResult.inserted) || 0 : saveStatusStats.inserted,
-    updated: saveResult ? Number(saveResult.updated) || 0 : saveStatusStats.updated,
-    deleted: saveResult ? Number(saveResult.deleted) || 0 : 0
-  };
-}
-
-function currentRunSaveResultForClub(group = {}, state = {}) {
-  if (group.clubId == null || !state?.runStartedAt) return null;
-  const groupRunStartedAt = (group.normal || []).find((record) => record?.runStartedAt)?.runStartedAt;
-  if (Number(groupRunStartedAt) !== Number(state.runStartedAt)) return null;
-  return state.clubSaveResults?.[String(group.clubId)] || null;
-}
-
-function groupStatsText(stats = {}) {
-  const parts = [];
-  if (stats.clubs != null) parts.push(`${Number(stats.clubs) || 0} kulüp`);
-  parts.push(`${Number(stats.records) || 0} okunan`);
-  if (Number(stats.inserted)) parts.push(`${Number(stats.inserted)} yeni`);
-  if (Number(stats.updated)) parts.push(`${Number(stats.updated)} güncellendi`);
-  if (Number(stats.deleted)) parts.push(`${Number(stats.deleted)} silindi`);
-  if (Number(stats.errors)) parts.push(`${Number(stats.errors)} hata`);
-  return parts.join(" · ");
-}
-
-function renderPlayerHeader() {
-  return `<div class="club-player-header sync-header"><span>POS</span><span>NAME</span><span>QUALITY</span><span>RARITY</span><span>RATING</span><span>LEAGUE</span><span>CLUB</span><span>NATION</span><span class="price-header">Price${playstationIcon()}</span></div>`;
-}
-
-function renderCoinCardHeader() {
-  return `<div class="club-player-header sync-header coin-card-header">
-    <span>KART</span>
-    <span>OYUNCU</span>
-    <span class="price-header">${consolePlatformIcon()}CONSOLE</span>
-    <span class="price-header">${pcPlatformIcon()}PC</span>
-    <span class="date-header">İŞLEM TARİHİ</span>
-  </div>`;
-}
-
-function renderCoinCardRecord(record) {
-  const player = record.player || {};
-  const fullPlayerName = String(player.name || "—");
-  const shortPlayerName = Array.from(fullPlayerName).slice(0, 15).join("");
-  const futbinUrl = safeFutbinUrl(player.futbinPlayerLink);
-  const playerImg = player.urlImgPlayer
-    ? `<img class="cc-player-img" src="${escapeHtml(player.urlImgPlayer)}" alt="" loading="lazy">`
-    : `<span class="compact-placeholder">—</span>`;
-  const cardCell = `<div class="grid-cell cc-card-cell">
-    <div class="cc-card-wrap" ${player.urlImgCard ? `style="background-image:url('${escapeHtml(player.urlImgCard)}')"` : ""}>
-      ${playerImg}
-    </div>
-  </div>`;
-  const nation = player.urlImgNation
-    ? `<img class="cc-nation-img" src="${escapeHtml(player.urlImgNation)}" alt="" loading="lazy">`
-    : "";
-  const playerDetails = `<div class="grid-cell cc-player-details" title="${escapeHtml(fullPlayerName)}">
-    <strong>${escapeHtml(shortPlayerName)}</strong>
-    <span class="cc-player-meta"><b>${escapeHtml(player.rating ?? "—")}</b>${nation}</span>
-  </div>`;
-  return `<article class="player-data-row sync-row coin-card-row${futbinUrl ? " is-clickable" : ""}"${syncRowLinkAttributes(futbinUrl)} title="${escapeHtml(player.name || "")}">
-      ${cardCell}
-      ${playerDetails}
-      ${priceRangeCell(player.priceConsole, player.minPriceConsole, player.maxPriceConsole)}
-      ${priceRangeCell(player.pricePc, player.minPricePc, player.maxPricePc)}
-      ${processedDateCell(record.processedAt)}
-    </article>`;
-}
-
-function groupEntityImage(imageUrl, name) {
-  return imageUrl ? `<img class="sync-group-icon" src="${escapeHtml(imageUrl)}" alt="" title="${escapeHtml(name)}" loading="lazy">` : "";
-}
-
-function renderPlayerRecord(record) {
-  const player = record.player || {};
-  const futbinUrl = safeFutbinUrl(player.futbinPlayerLink);
-  return `<article class="player-data-row sync-row${futbinUrl ? " is-clickable" : ""}"${syncRowLinkAttributes(futbinUrl)} title="${escapeHtml(player.name || "")}">
-      ${cell(player.positionName, "position-cell")}
-      ${cell(player.name, "player-cell")}
-      ${imageCell(player.qualityImageUrl || player.urlImgCard, player.qualityCode, "quality-cell")}
-      ${imageCell(player.urlImgCard, rarityTooltip(player), `rarity-cell${isCommonRarity(player) ? " is-common" : ""}`)}
-      ${cell(player.rating, "rating-cell")}
-      ${assetCell("", player.urlImgLeague, "league-cell")}
-      ${assetCell("", player.urlImgClub, "club-cell")}
-      ${assetCell("", player.urlImgNation, "nation-cell")}
-      ${priceCell(player.priceConsole)}
-    </article>`;
 }
 
 function renderErrorRecord(entry) {
@@ -842,12 +565,30 @@ function renderLogs(logs, errors = []) {
   }
   elements.logs.innerHTML = logs.map((entry) => {
     const time = new Date(entry.requestedAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    if (entry.logType === "web-app-detail") {
+      const sequence = entry.sequence ? `#${String(entry.sequence).padStart(3, "0")} ` : "";
+      const details = formatLogDetails(entry.details);
+      return `<div class="request-log-link" title="${escapeHtml(details || entry.message || "")}">
+        <span class="request-log-time">${escapeHtml(time)}</span>
+        <span class="request-log-body"><b>${escapeHtml(`${sequence}${entry.step || "FLOW"}`)}</b><small>${escapeHtml(entry.message || "")}${details ? ` · ${escapeHtml(details)}` : ""}</small></span>
+      </div>`;
+    }
     const label = `${entry.leagueName || "Lig"} → ${entry.clubName || "Kulüp"} · Sayfa ${entry.page || "—"}`;
     return `<a class="request-log-link" href="#" data-url="${escapeHtml(entry.url || "")}" title="${escapeHtml(entry.url || "")}">
       <span class="request-log-time">${escapeHtml(time)}</span>
       <span class="request-log-body"><b>${escapeHtml(label)}</b><small>${escapeHtml(entry.url || "")}</small></span>
     </a>`;
   }).join("");
+}
+
+function formatLogDetails(details) {
+  if (details === null || details === undefined || details === "") return "";
+  if (typeof details === "string") return details;
+  try {
+    return JSON.stringify(details);
+  } catch {
+    return String(details);
+  }
 }
 
 function renderErrorLogs(errors = []) {
@@ -893,16 +634,6 @@ function imageCell(imageUrl, description, className = "") {
   const title = description === null || description === undefined || description === "" ? "—" : String(description);
   const image = imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="" loading="lazy">` : '<span class="compact-placeholder">—</span>';
   return `<div class="grid-cell icon-cell ${className}" title="${escapeHtml(title)}">${image}</div>`;
-}
-
-function rarityTooltip(player) {
-  const id = player.rarityFutbinId ?? "—";
-  const name = player.rarityCardName || player.rarityName || player.rarityCode || "—";
-  return `ID: ${id} · Name: ${name}`;
-}
-
-function isCommonRarity(player) {
-  return Number(player.rarityFutbinId) === 0 || String(player.rarityCode || "").toLowerCase() === "common";
 }
 
 function priceCell(value) {
