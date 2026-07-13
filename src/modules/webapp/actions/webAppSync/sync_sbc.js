@@ -14,6 +14,7 @@
     }
   };
 
+
   const selectors = {
     homeBtn: "button.ut-tab-bar-item.icon-home",
     sbcBtn: "button.ut-tab-bar-item.icon-sbc",
@@ -56,7 +57,9 @@
       isRunning: true,
       currentLang: "en",
       loc: TEXT.en,
-      formations: []
+      formations: [],
+      lastSbcPlayerRequestAt: 0,
+      postedParentLookupKeys: new Set()
     };
 
     const runner = {
@@ -69,7 +72,19 @@
       waitForVisibleElement: core.waitForVisibleElement,
       webAppLog: core.webAppLog || (() => Promise.resolve()),
 
+      consoleLog(step, message, details = null) {
+        const payload = {
+          at: new Date().toISOString(),
+          lang: this.state.currentLang || null,
+          step,
+          message,
+          details: details || null
+        };
+        console.log("[WEBAPP-SYNC][SBC]", payload);
+      },
+
       async log(step, message, details) {
+        this.consoleLog(step, message, details);
         await this.webAppLog(step, message, details);
       },
 
@@ -140,26 +155,16 @@
       async api(method, endpoint, body = null) {
         const methodName = String(method || "GET").toUpperCase();
         const loader = window.FutbinSyncWebAppApiLoader;
-        const request = () => chrome.runtime.sendMessage({
-          type: "WEB_APP_API_REQUEST",
-          method: methodName,
-          endpoint,
-          body
-        });
+        const request = () => window.FutbinSyncWebAppApi(methodName, endpoint, body);
         const message = loader?.wrap
           ? await loader.wrap(`${methodName} ${endpoint} API isteği gönderiliyor...`, request, {
             method: methodName,
-            endpoint
+            endpoint,
+            lang: this.state.currentLang,
+            operation: methodName === "GET" ? "load" : "save"
           })
           : await request();
-        if (!message?.ok) {
-          return {
-            result: false,
-            message: message?.error || message?.response?.message || "API isteği başarısız",
-            data: message?.response?.data || null
-          };
-        }
-        return message.response;
+        return message;
       },
 
       get(endpoint) {
@@ -470,6 +475,7 @@
           parent_name: this.nonNullString(dbEntry?.parent_name),
           formation_id: Number(dbEntry?.formation_id) || 0,
           slots: Array.isArray(dbEntry?.slots) ? dbEntry.slots : [],
+          sbc_players: this.getExistingSbcPlayers(dbEntry),
           subs: Array.isArray(dbEntry?.subs)
             ? dbEntry.subs.map((sub, index) => this.buildExistingSbcEntryForRepeatUpdate(sub, {
               sort_no: Number(sub?.sort_number ?? sub?.sort_no ?? index + 1) || index + 1,
@@ -484,6 +490,17 @@
             }, lang))
             : []
         };
+      },
+
+      getExistingSbcPlayers(entry) {
+        if (Array.isArray(entry?.sbc_players) && entry.sbc_players.length > 0) return entry.sbc_players;
+        if (Array.isArray(entry?.sbc_player) && entry.sbc_player.length > 0) return entry.sbc_player;
+        if (Array.isArray(entry?.players) && entry.players.length > 0) return entry.players;
+        return [];
+      },
+
+      hasExistingSbcPlayers(entry) {
+        return this.getExistingSbcPlayers(entry).length > 0;
       },
 
       buildSbcSyncTilePayload(entry, lang, parentName = "") {
@@ -524,8 +541,59 @@
           parent_name: this.nonNullString(entry?.parent_name || parentName),
           formation_id: Number(entry?.formation_id) || 0,
           slots: Array.isArray(entry?.slots) ? entry.slots.map((slot) => this.nonNullString(slot)) : [],
+          sbc_players: this.normalizeSbcPlayersPayload(entry?.sbc_players),
           subs
         };
+      },
+
+      normalizeSbcPlayersPayload(players) {
+        return (Array.isArray(players) ? players : [])
+          .map((player, index) => ({
+            name: this.nonNullString(player?.name).trim(),
+            full_name: this.nonNullString(player?.full_name || player?.fullName || player?.name).trim(),
+            rating: this.normalizeSyncInt(player?.rating),
+            position: this.nonNullString(player?.position).trim(),
+            position_id: this.normalizeSyncInt(player?.position_id),
+            slot: this.nonNullString(player?.slot || player?.slot_name).trim(),
+            slot_name: this.nonNullString(player?.slot_name || player?.slot).trim(),
+            slot_id: this.normalizeSyncInt(player?.slot_id),
+            quality: this.nonNullString(player?.quality).trim(),
+            quality_id: this.normalizeSyncInt(player?.quality_id),
+            rarity: this.nonNullString(player?.rarity).trim(),
+            rarity_id: this.normalizeSyncInt(player?.rarity_id),
+            futbin_rarity: this.nonNullString(player?.futbin_rarity || player?.futbinRarity).trim(),
+            price: this.normalizeSyncInt(player?.price),
+            price_pc: this.normalizeSyncInt(player?.price_pc),
+            price_console: this.normalizeSyncInt(player?.price_console),
+            index
+          }))
+          .filter((player) => player.name || player.rating || player.slot || player.position);
+      },
+
+      countTilePlayers(tilePayload) {
+        const own = Array.isArray(tilePayload?.sbc_players) ? tilePayload.sbc_players.length : 0;
+        const child = (Array.isArray(tilePayload?.subs) ? tilePayload.subs : [])
+          .reduce((total, sub) => total + this.countTilePlayers(sub), 0);
+        return own + child;
+      },
+
+      buildParentLookupKey(categoryId, tilePayload, lang) {
+        const parentName = tilePayload?.group === true
+          ? tilePayload?.name?.[this.activeReqsLang(lang)] || tilePayload?.name?.en || tilePayload?.name?.tr
+          : tilePayload?.parent_name;
+        if (!parentName) return "";
+        return [
+          Number(categoryId) || 0,
+          normalizeLang(lang),
+          this.normalizeString(parentName),
+          Number(tilePayload?.sort_no) || 0
+        ].join("|");
+      },
+
+      isParentLookupOnlyPayload(tilePayload) {
+        return tilePayload?.group === true &&
+          (!Array.isArray(tilePayload?.subs) || tilePayload.subs.length === 0) &&
+          this.countTilePlayers(tilePayload) === 0;
       },
 
       validateTileReqsBeforePost(tilePayload, lang, path = "") {
@@ -551,7 +619,18 @@
         }
         const tilePayload = this.buildSbcSyncTilePayload(sbcEntry, lang);
         const repeatableOnlyUpdate = sbcEntry?.update_reason === "repeatable_fields_changed_only";
-        if (!repeatableOnlyUpdate && !this.validateTileReqsBeforePost(tilePayload, lang, sbcEntry.name)) return false;
+        if (!repeatableOnlyUpdate && !this.validateTileReqsBeforePost(tilePayload, lang, sbcEntry.name)) {
+          counters.lastError = {
+            stage: "validate-before-post",
+            categoryId,
+            lang,
+            name: sbcEntry.name,
+            group: tilePayload?.group === true,
+            playerCount: this.countTilePlayers(tilePayload)
+          };
+          this.consoleLog("SBC_POST_BLOCKED", "Tile payload validation başarısız; API post gönderilmedi.", counters.lastError);
+          return false;
+        }
 
         counters.postedCount += 1;
         await this.log("SBC_SAVE", "SBC tile API'ye gönderiliyor.", {
@@ -560,8 +639,27 @@
           name: sbcEntry.name,
           group: tilePayload.group,
           subs: tilePayload.subs?.length || 0,
+          playerCount: this.countTilePlayers(tilePayload),
           updateReason: sbcEntry.update_reason || null
         });
+
+        const parentLookupKey = this.buildParentLookupKey(categoryId, tilePayload, lang);
+        if (parentLookupKey && this.isParentLookupOnlyPayload(tilePayload)) {
+          if (this.state.postedParentLookupKeys.has(parentLookupKey)) {
+            counters.skippedCount += 1;
+            counters.postedCount -= 1;
+            await this.log("SBC_SKIP", "Aynı parent SBC için tekrar eden parent lookup isteği atlandı.", {
+              name: sbcEntry.name,
+              parentLookupKey
+            });
+            return true;
+          }
+          this.state.postedParentLookupKeys.add(parentLookupKey);
+        }
+        if (parentLookupKey && tilePayload?.group === true && !this.isParentLookupOnlyPayload(tilePayload)) {
+          this.state.postedParentLookupKeys.add(parentLookupKey);
+        }
+
         const saveResult = await this.post("sbc/tile-sync", {
           tile: tilePayload,
           lang,
@@ -581,6 +679,17 @@
         }
 
         counters.failedCount += 1;
+        counters.lastError = {
+          stage: "tile-sync-post",
+          categoryId,
+          lang,
+          name: sbcEntry.name,
+          group: tilePayload.group,
+          subs: tilePayload.subs?.length || 0,
+          playerCount: this.countTilePlayers(tilePayload),
+          message: saveResult?.message || "Bilinmeyen hata",
+          response: saveResult || null
+        };
         await this.log("SBC_ERROR", "SBC tile kayıt hatası.", {
           name: sbcEntry.name,
           message: saveResult?.message || "Bilinmeyen hata"
@@ -670,6 +779,173 @@
         return slots;
       },
 
+      readSbcPlayersFromPitch(name = "SBC") {
+        const pitchView = document.querySelector(".ut-squad-pitch-view");
+        if (!pitchView) return [];
+
+        const slotElements = Array.from(pitchView.querySelectorAll(".ut-squad-slot-view:not(.locked)"));
+        const players = slotElements.map((slotElement, index) => {
+          const slot = this.readSlotLabel(slotElement);
+          const card = this.findPlayerCardElement(slotElement);
+          if (!card) return null;
+
+          const nameText = this.readPlayerName(card);
+          const rating = this.readFirstInt(card, [
+            "[class*='rating']",
+            "[class*='Rating']",
+            ".rating",
+            ".ut-player-card--rating"
+          ]);
+          const position = this.readPlayerPosition(card) || slot;
+          const price = this.readPrice(card);
+          const rarityInfo = this.readRarityInfo(card);
+
+          if (!nameText && !rating) return null;
+
+          return {
+            name: nameText,
+            full_name: nameText,
+            rating,
+            position,
+            slot,
+            quality: rarityInfo.quality,
+            rarity: rarityInfo.rarity,
+            futbin_rarity: rarityInfo.futbin_rarity,
+            price,
+            price_pc: price,
+            price_console: price,
+            index
+          };
+        }).filter(Boolean);
+
+        this.log("SBC_PLAYERS", "SBC player bilgileri pitch üzerinden okundu.", {
+          name,
+          slotCount: slotElements.length,
+          playerCount: players.length
+        });
+
+        return players;
+      },
+
+      readSlotLabel(slotElement) {
+        return this.nonNullString(
+          slotElement?.querySelector("div.ut-squad-slot-pedestal-view > span.label")?.innerText ||
+          slotElement?.querySelector("[class*='pedestal'] span.label")?.innerText ||
+          slotElement?.querySelector("[class*='position']")?.innerText ||
+          slotElement?.getAttribute("aria-label")
+        ).trim();
+      },
+
+      findPlayerCardElement(slotElement) {
+        const candidates = [
+          ".ut-player-card",
+          ".ut-item-card",
+          ".listFUTItem",
+          "[class*='player-card']",
+          "[class*='PlayerCard']",
+          "[class*='playerCard']",
+          "[class*='card'][class*='player']",
+          "[class*='item-card']",
+          "[class*='ItemCard']"
+        ];
+        for (const selector of candidates) {
+          const element = slotElement?.querySelector(selector);
+          if (element) return element;
+        }
+        const image = slotElement?.querySelector("img[alt], img[src*='players'], img[src*='items/images']");
+        return image?.closest("[class*='card'], [class*='item'], [class*='player']") || null;
+      },
+
+      readPlayerName(card) {
+        const selectors = [
+          "[class*='name']",
+          "[class*='Name']",
+          ".ut-player-card--name",
+          ".player-name",
+          ".name"
+        ];
+        for (const selector of selectors) {
+          const text = this.nonNullString(card.querySelector(selector)?.innerText || card.querySelector(selector)?.textContent).trim();
+          if (text && !/^\d+$/.test(text)) return text;
+        }
+        const alt = this.nonNullString(card.querySelector("img[alt]")?.getAttribute("alt")).trim();
+        if (alt && !/club|nation|rarity|card/i.test(alt)) return alt;
+        return this.nonNullString(card.getAttribute("aria-label") || card.getAttribute("title")).trim();
+      },
+
+      readPlayerPosition(card) {
+        const selectors = [
+          "[class*='position']",
+          "[class*='Position']",
+          ".ut-player-card--position",
+          ".position"
+        ];
+        for (const selector of selectors) {
+          const text = this.nonNullString(card.querySelector(selector)?.innerText || card.querySelector(selector)?.textContent).trim();
+          if (/^[A-Z]{1,3}$/.test(text)) return text;
+        }
+        const text = this.nonNullString(card.innerText || card.textContent);
+        const match = text.match(/\b(GK|CB|LB|RB|LWB|RWB|CDM|CM|CAM|LM|RM|LW|RW|CF|ST)\b/i);
+        return match ? match[1].toUpperCase() : "";
+      },
+
+      readFirstInt(root, selectors = []) {
+        for (const selector of selectors) {
+          const text = this.nonNullString(root.querySelector(selector)?.innerText || root.querySelector(selector)?.textContent);
+          const number = this.normalizeSyncInt(text);
+          if (number != null) return number;
+        }
+        return null;
+      },
+
+      readPrice(card) {
+        const text = this.nonNullString(card.innerText || card.textContent);
+        const priceMatch = text.match(/([\d.,]+)\s*(K|M)\b/i) ||
+          (text.toLowerCase().includes("coin") ? text.match(/([\d.,]+)/i) : null);
+        if (!priceMatch) return null;
+        const base = Number(priceMatch[1].replace(/,/g, "."));
+        if (!Number.isFinite(base)) return null;
+        const suffix = this.nonNullString(priceMatch[2]).toUpperCase();
+        if (suffix === "M") return Math.round(base * 1000000);
+        if (suffix === "K") return Math.round(base * 1000);
+        return Math.round(base);
+      },
+
+      readRarityInfo(card) {
+        const source = [
+          card.className,
+          ...Array.from(card.querySelectorAll("img")).map((img) => `${img.src || ""} ${img.alt || ""}`)
+        ].join(" ").toLowerCase();
+        const quality = source.includes("bronze")
+          ? "bronze"
+          : source.includes("silver")
+            ? "silver"
+            : source.includes("gold")
+              ? "gold"
+              : source.includes("special")
+                ? "special"
+                : "";
+        const rarityMatch = source.match(/(?:cards|card)[^\s]*\/(?:tiny|hd)?\/?(\d+_[a-z0-9_]+)/i) ||
+          source.match(/\b(\d+_[a-z0-9_]*(?:bronze|silver|gold|special)[a-z0-9_]*)\b/i);
+        const futbinRarity = rarityMatch ? rarityMatch[1] : "";
+        const rarity = futbinRarity ? futbinRarity.split("_")[0] : "";
+        return { quality, rarity, futbin_rarity: futbinRarity };
+      },
+
+      async readSbcPlayersFromWebApp({ categoryName, parentName, detailSbcName, nameIndex = 0 }) {
+        const players = this.readSbcPlayersFromPitch(detailSbcName || parentName);
+        await this.log(players.length ? "SBC_PLAYERS" : "SBC_WARN", players.length
+          ? "SBC player bilgileri Web App pitch üzerinden kullanıldı."
+          : "SBC player bilgisi Web App pitch üzerinde bulunamadı; boş oyuncu listesiyle devam ediliyor.", {
+          categoryName,
+          parentName,
+          detailSbcName,
+          nameIndex,
+          playerCount: players.length
+        });
+        return players;
+      },
+
       formationIdFromScreen(name) {
         const pitchView = document.querySelector(".ut-squad-pitch-view");
         const classList = Array.from(pitchView?.classList || []);
@@ -716,7 +992,7 @@
         return false;
       },
 
-      async readSubRows(lang, dbSubs = [], expectedCount = null) {
+      async readSubRows(lang, dbSubs = [], expectedCount = null, parentName = "", categoryName = "") {
         const expectedRows = Number(expectedCount);
         if (Number.isInteger(expectedRows) && expectedRows > 0) {
           const rowsReady = await this.waitForSubRowsReady(expectedRows);
@@ -756,8 +1032,9 @@
             : { changed: false, changedFields: [], db: null, screen: null };
           const dbSubNameReady = dbSub && this.getLocalized(dbSub.name, lang).trim();
           const dbSubReqsReady = dbSub && this.reqsHasRowsForLang(dbSub.reqs, lang);
+          const dbSubPlayersReady = dbSub && this.hasExistingSbcPlayers(dbSub);
 
-          if (dbSubNameReady && dbSubReqsReady && !rowRepeatCompare.changed) {
+          if (dbSubNameReady && dbSubReqsReady && dbSubPlayersReady && !rowRepeatCompare.changed) {
             subs.push(this.buildExistingSbcEntryForRepeatUpdate(dbSub, {
               sort_no: subSortNo++,
               icon_url: rowIconUrl,
@@ -772,7 +1049,7 @@
             continue;
           }
 
-          if (dbSubNameReady && dbSubReqsReady && rowRepeatCompare.changed) {
+          if (dbSubNameReady && dbSubReqsReady && dbSubPlayersReady && rowRepeatCompare.changed) {
             const repeatUpdateSub = this.buildExistingSbcEntryForRepeatUpdate(dbSub, {
               sort_no: subSortNo++,
               icon_url: rowIconUrl,
@@ -792,14 +1069,14 @@
           }
 
           await this.click(row);
-          await this.wait(600);
+          await this.waitForElement(".btn-standard.primary", 5000);
           const goToChallengeBtn = document.querySelector(".btn-standard.primary");
           if (!goToChallengeBtn) {
             await this.log("SBC_WARN", "Go to Challenge butonu bulunamadı, sub SBC atlandı.", { rowIdx });
             continue;
           }
           await this.click(goToChallengeBtn);
-          await this.wait(600);
+          await this.waitForElement(".ut-squad-pitch-view", 10000);
 
           const rowsAfterClick = Array.from(document.querySelectorAll(this.selectors.subRow));
           const currentSubRow = rowsAfterClick[rowIdx] || row;
@@ -824,6 +1101,12 @@
 
           const slots = await this.readSlots(lang, reqs, name);
           if (slots === null) return null;
+          const sbc_players = await this.readSbcPlayersFromWebApp({
+            categoryName,
+            parentName,
+            detailSbcName: name,
+            nameIndex: name_index
+          });
 
           subs.push({
             sort_no: subSortNo++,
@@ -839,13 +1122,14 @@
             reqs,
             formation_id,
             slots,
+            sbc_players,
             name_index
           });
 
           const backBtn = document.querySelector(this.selectors.backBtn);
           if (!backBtn) return null;
           await this.click(backBtn);
-          await this.wait(600);
+          await this.waitForElement(this.selectors.subRow, 10000);
         }
         return subs;
       },
@@ -912,6 +1196,8 @@
           deletedCount: 0,
           tileDeletedCount: 0,
           updatedSortCount: 0,
+          aborted: false,
+          errorMessage: null,
           completedAt: null
         };
 
@@ -943,6 +1229,11 @@
           if (this.stopped()) break;
           const categoryName = this.getLocalized(category.name, normalizedLang).trim().toLowerCase();
           const categoryId = Number(category.id ?? category.Id ?? category.category_id ?? category.CategoryId ?? 0);
+          await this.log("SBC_CATEGORY_START", "SBC kategori işleniyor.", {
+            lang: normalizedLang,
+            categoryName,
+            categoryId
+          });
           if (!categoryName || !categoryId) {
             await this.log("SBC_WARN", "Kategori adı veya ID geçersiz, atlandı.", { category });
             continue;
@@ -960,7 +1251,6 @@
 
           await this.click(currentFilter);
           await this.waitForElement(this.selectors.tileView, 5000);
-          await this.wait(1000);
           const tilesReady = await this.waitForTilesReady();
           if (!tilesReady) {
             await this.log("SBC_WARN", "Kategori tile'ları hazır olmadı, kategori atlandı.", {
@@ -984,6 +1274,7 @@
           let tileIndex = 0;
           let tileSortNo = 1;
           let hasInvalidTile = false;
+          let invalidReason = null;
 
           while (!hasInvalidTile) {
             if (this.stopped()) break;
@@ -1003,6 +1294,7 @@
                 desc,
                 categoryName
               });
+              invalidReason = "Zorunlu tile alanı eksik.";
               hasInvalidTile = true;
               break;
             }
@@ -1017,12 +1309,25 @@
             const repeatable_text = this.getRepeatableTextFromTile(tile);
             const repeatable_source = "tile_status_label";
             const daily = this.detectDailyFromName(name);
+            const tileContext = {
+              lang: normalizedLang,
+              categoryName,
+              categoryId,
+              tileIndex,
+              sortNo: tileSortNo,
+              name,
+              desc,
+              reward,
+              isGroup,
+              subCount
+            };
+            await this.log("SBC_TILE_START", "SBC tile değerlendiriliyor.", tileContext);
 
             const dbKey = this.buildScreenTileKey({ categoryId, icon_url, name, desc, reward });
             const dbIdentityKey = this.buildDbIdentityKey({ categoryId, sort_no: tileSortNo, group: isGroup });
             const dbVisibleEntry = dbMap[dbKey] || null;
             const dbIdentityEntry = dbIdentityMap[dbIdentityKey] || null;
-            const dbEntry = dbVisibleEntry || dbIdentityEntry;
+            const dbEntry = dbVisibleEntry;
             const visibleCompare = dbEntry
               ? this.compareVisibleTileFields(dbEntry, { icon_url, name, desc, reward }, normalizedLang)
               : { changed: false, changedFields: [], db: null, screen: null };
@@ -1030,11 +1335,29 @@
               ? this.compareRepeatableFields(dbEntry, { repeatable, repeat_count, daily, repeatable_text, repeatable_source })
               : { changed: false, changedFields: [], db: null, screen: null };
 
-            const visibleFieldChanged = !dbEntry || visibleCompare.changed;
+            const visibleFieldChanged = Boolean(dbEntry && visibleCompare.changed);
             const repeatableFieldChanged = repeatCompare.changed;
-            const shouldUpdateBackend = !dbEntry || visibleFieldChanged || repeatableFieldChanged;
-            const shouldOpenDetail = !dbEntry || visibleFieldChanged;
-            const repeatableOnlyChange = dbEntry && repeatableFieldChanged && !visibleFieldChanged;
+            const shouldUpdateBackend = !dbEntry || repeatableFieldChanged;
+            const shouldOpenDetail = !dbEntry;
+            const repeatableOnlyChange = dbEntry && repeatableFieldChanged;
+            const decisionReason = !dbEntry
+              ? "new_tile"
+              : repeatableFieldChanged
+                ? `repeatable_fields_changed:${repeatCompare.changedFields.join(",")}`
+                : "unchanged";
+
+            await this.log("SBC_TILE_DECISION", "SBC tile karar verildi.", {
+              ...tileContext,
+              dbFound: Boolean(dbEntry),
+              matchedBy: dbVisibleEntry ? "visible" : (dbIdentityEntry ? "identity_ignored" : "none"),
+              visibleFieldChanged,
+              visibleChangedFields: visibleCompare.changedFields,
+              repeatableFieldChanged,
+              repeatableChangedFields: repeatCompare.changedFields,
+              shouldUpdateBackend,
+              shouldOpenDetail,
+              reason: decisionReason
+            });
 
             if (!shouldUpdateBackend) {
               counters.skippedCount += 1;
@@ -1088,6 +1411,7 @@
               repeatUpdateEntry.subs = [];
               const postResult = await this.postTileData(categoryId, repeatUpdateEntry, normalizedLang, counters);
               if (!postResult) {
+                invalidReason = `Repeatable tile kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
@@ -1097,9 +1421,10 @@
 
             if (isGroup) {
               await this.click(tile);
-              await this.wait(1000);
-              const subs = await this.readSubRows(normalizedLang, dbEntry?.subs || [], subCount);
+              await this.waitForElement(this.selectors.subRow, 10000);
+              const subs = await this.readSubRows(normalizedLang, dbEntry?.subs || [], subCount, name, currentFilter.innerText?.trim() || categoryName);
               if (subs === null) {
+                invalidReason = `Sub SBC bilgileri okunamadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
@@ -1112,6 +1437,7 @@
                   current: sbcEntry.child_count,
                   expected: subCount
                 });
+                invalidReason = `Geçersiz child_count: ${categoryName} > ${name} (${sbcEntry.child_count}/${subCount})`;
                 hasInvalidTile = true;
                 break;
               }
@@ -1119,26 +1445,29 @@
               const backBtn = document.querySelector(this.selectors.backBtn);
               if (backBtn) {
                 await this.click(backBtn);
-                await this.wait(2000);
+                await this.waitForElement(this.selectors.filterItem, 10000);
               }
               const catFilterEl = Array.from(document.querySelectorAll(this.selectors.filterItem))
                 .find((element) => element.innerText?.trim().toLowerCase() === categoryName);
               if (catFilterEl) await this.click(catFilterEl);
               await this.waitForElement(this.selectors.tileView, 5000);
               if (!await this.waitForTilesReady()) {
+                invalidReason = `Kategori tile listesi geri dönüş sonrası hazır olmadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
               const postResult = await this.postTileData(categoryId, sbcEntry, normalizedLang, counters);
               if (!postResult) {
+                invalidReason = `Group SBC tile-sync kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
             } else if (shouldOpenDetail) {
               await this.click(tile);
-              await this.wait(600);
+              await this.waitForElement(".ut-squad-pitch-view", 10000);
               sbcEntry.reqs = await this.readReqsOrStop(name, normalizedLang, 10000);
               if (!sbcEntry.reqs) {
+                invalidReason = `SBC requirements okunamadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
@@ -1147,32 +1476,43 @@
               sbcEntry.formation_id = formation_id;
               if (!formation_id) {
                 this.state.isRunning = false;
+                invalidReason = `Formation bilgisi okunamadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
 
               const slots = await this.readSlots(normalizedLang, sbcEntry.reqs, name);
               if (slots === null) {
+                invalidReason = `Slot bilgileri okunamadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
               sbcEntry.slots = slots;
+              const sbcPlayers = await this.readSbcPlayersFromWebApp({
+                categoryName: currentFilter.innerText?.trim() || categoryName,
+                parentName: name,
+                detailSbcName: name,
+                nameIndex: 0
+              });
+              sbcEntry.sbc_players = sbcPlayers;
 
               const backBtn = document.querySelector(this.selectors.backBtn);
               if (backBtn) {
                 await this.click(backBtn);
-                await this.wait(400);
+                await this.waitForElement(this.selectors.filterItem, 10000);
               }
               const catFilterSingle = Array.from(document.querySelectorAll(this.selectors.filterItem))
                 .find((element) => element.innerText?.trim().toLowerCase() === categoryName);
               if (catFilterSingle) await this.click(catFilterSingle);
               await this.waitForElement(this.selectors.tileView, 5000);
               if (!await this.waitForTilesReady()) {
+                invalidReason = `Single SBC dönüş sonrası tile listesi hazır olmadı: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
               const postResult = await this.postTileData(categoryId, sbcEntry, normalizedLang, counters);
               if (!postResult) {
+                invalidReason = `Single SBC tile-sync kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
               }
@@ -1181,7 +1521,18 @@
             tileIndex += 1;
           }
 
-          if (hasInvalidTile || this.stopped()) break;
+          if (hasInvalidTile || this.stopped()) {
+            counters.aborted = true;
+            counters.failedCount += counters.failedCount > 0 ? 0 : 1;
+            counters.errorMessage = invalidReason || (this.stopped() ? "SBC sync durduruldu." : "SBC sync geçersiz tile nedeniyle durdu.");
+            await this.log("SBC_ABORT", "SBC kategori döngüsü hata nedeniyle durdu.", {
+              lang: normalizedLang,
+              categoryName,
+              reason: counters.errorMessage,
+              lastError: counters.lastError || null
+            });
+            break;
+          }
         }
 
         counters.completedAt = Date.now();

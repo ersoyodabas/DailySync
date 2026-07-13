@@ -6,7 +6,7 @@
       futClick,
       isElementVisible,
       normalize,
-      sleep,	
+      waitUntil,
       waitForVisibleElement,
       webAppLog
     } = window.FutbinSyncWebAppCore;
@@ -29,8 +29,11 @@
 
     const listMessage = await withApiLoader(
       "Rarity listesi API'den yükleniyor...",
-      () => chrome.runtime.sendMessage({ type: "WEB_APP_RARITY_LIST" }),
-      { method: "GET", endpoint: "rarity" }
+      async () => {
+        const response = await window.FutbinSyncWebAppApi("GET", "rarity");
+        return { ok: response?.result !== false, response };
+      },
+      { method: "GET", endpoint: "rarity", lang, operation: "load" }
     );
     if (!listMessage?.ok || !listMessage.response?.result) {
       throw new Error(`[CRITICAL] DB rarity listesi alınamadı: ${listMessage?.error || listMessage?.response?.message || "Bilinmeyen hata"}`);
@@ -55,13 +58,11 @@
     if (!clubMenuButton) throw new Error("[CRITICAL] Kulüp menüsü butonu bulunamadı.");
     await webAppLog("RARITY", "Club menüsü açılıyor.");
     await futClick(clubMenuButton);
-    await sleep(800);
 
     const playerTile = await waitForVisibleElement(".players-tile", 10000);
     if (!playerTile) throw new Error("[CRITICAL] Oyuncular tile bulunamadı.");
     await webAppLog("RARITY", "Players ekranı açılıyor.");
     await futClick(playerTile);
-    await sleep(800);
 
     const filterButton = await waitForVisibleElement(".btn-standard", 10000);
     if (!filterButton) throw new Error("[CRITICAL] Oyuncu filtreleme butonu bulunamadı.");
@@ -69,7 +70,13 @@
       text: normalize(filterButton.textContent)
     });
     await futClick(filterButton);
-    await sleep(600);
+    await waitUntil(
+      () => [...document.querySelectorAll("div.inline-list-select.ut-search-filter-control")]
+        .some(isElementVisible),
+      10000,
+      100,
+      "[CRITICAL] Oyuncu filtreleri açıldıktan sonra filter kontrolleri hazır olmadı."
+    );
 
     const rarityLabels = lang === "tr"
       ? ["rarity", "nadirlik", "enderlik"]
@@ -87,7 +94,12 @@
     if (!inlineContainer) throw new Error("[CRITICAL] Rarity inline-container bulunamadı.");
     await webAppLog("RARITY", "Rarity filtresi açılıyor.");
     await futClick(inlineContainer);
-    await sleep(800);
+    await waitUntil(
+      () => [...rarityFilter.querySelectorAll(".inline-container ul li")].some(isElementVisible),
+      10000,
+      100,
+      "[CRITICAL] Rarity seçenekleri açıldıktan sonra liste hazır olmadı."
+    );
 
     const rarityItems = [...rarityFilter.querySelectorAll(".inline-container ul li")]
       .filter(isElementVisible);
@@ -96,6 +108,11 @@
     });
 
     const rarities = [];
+    const scanStartedAt = Date.now();
+    const skippedExistingNames = [];
+    const skippedPlaceholderNames = [];
+    const foundRarityNames = [];
+    const duplicateNames = [];
     let skippedExisting = 0;
     let skippedPlaceholder = 0;
     for (const rarityItem of rarityItems) {
@@ -107,12 +124,12 @@
         : ["any"];
       if (placeholderLabels.includes(lowerRarityName)) {
         skippedPlaceholder += 1;
-        await webAppLog("RARITY", "Placeholder rarity seçeneği atlandı.", { name: rarityName });
+        skippedPlaceholderNames.push(rarityName);
         continue;
       }
       if (dbRarityNames.has(rarityName.toLowerCase())) {
         skippedExisting += 1;
-        await webAppLog("RARITY", `DB'de ${lang.toUpperCase()} adı mevcut rarity atlandı.`, { name: rarityName, lang });
+        skippedExistingNames.push(rarityName);
         continue;
       }
 
@@ -135,7 +152,7 @@
         icon_url: iconUrl,
         futbin_id: futbinId
       });
-      await webAppLog("RARITY_FOUND", `Yeni rarity bulundu: ${rarityName}`, {
+      foundRarityNames.push({
         name: rarityName,
         hasIcon: Boolean(iconUrl),
         futbinId
@@ -147,20 +164,27 @@
     for (const rarity of rarities) {
       const lowerName = normalize(rarity.name?.[lang]).toLowerCase();
       if (!lowerName || seenNames.has(lowerName)) {
-        if (lowerName) await webAppLog("RARITY", "Duplike rarity atlandı.", { name: rarity.name?.[lang] });
+        if (lowerName) duplicateNames.push(rarity.name?.[lang]);
         continue;
       }
       seenNames.add(lowerName);
       dedupedRarities.push(rarity);
     }
+    const scanElapsedMs = Date.now() - scanStartedAt;
     await webAppLog("RARITY_SCAN", dedupedRarities.length > 0
-      ? `Rarity taraması tamamlandı. ${dedupedRarities.length} yeni rarity bulundu.`
-      : "Rarity taraması tamamlandı. Yeni rarity bulunamadı.", {
+      ? `Rarity taraması tamamlandı. Mevcut olduğu için ${skippedExisting} rarity atlandı; yeni rarity: ${dedupedRarities.length}.`
+      : `Rarity taraması tamamlandı. Mevcut olduğu için ${skippedExisting} rarity atlandı; yeni rarity yok.`, {
       readCount: rarityItems.length,
       candidateCount: rarities.length,
       dedupedCount: dedupedRarities.length,
       skippedExisting,
-      skippedPlaceholder
+      skippedPlaceholder,
+      duplicateCount: duplicateNames.length,
+      scanElapsedMs,
+      skippedExistingNames,
+      skippedPlaceholderNames,
+      duplicateNames,
+      foundRarityNames
     });
 
     let saveResponse = { result: true, data: null, message: "Yeni rarity bulunamadı." };
@@ -170,12 +194,14 @@
       });
       const saveMessage = await withApiLoader(
         "Yeni rarity kayıtları API'ye gönderiliyor...",
-        () => chrome.runtime.sendMessage({
-          type: "WEB_APP_RARITY_BULK_SYNC",
-          lang,
-          rarities: dedupedRarities
-        }),
-        { method: "POST", endpoint: "rarity/bulk-sync" }
+        async () => {
+          const response = await window.FutbinSyncWebAppApi("POST", "rarity/bulk-sync", {
+            lang,
+            rarities: dedupedRarities
+          });
+          return { ok: response?.result !== false, response };
+        },
+        { method: "POST", endpoint: "rarity/bulk-sync", lang, operation: "save" }
       );
       if (!saveMessage?.ok || !saveMessage.response?.result) {
         throw new Error(`[CRITICAL] Rarity kayıt hatası: ${saveMessage?.error || saveMessage?.response?.message || "Bilinmeyen hata"}`);

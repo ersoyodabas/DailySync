@@ -1,5 +1,16 @@
 const $ = (selector) => document.querySelector(selector);
-const LOCAL_API_BASE_URL = "http://localhost:5055/api/";
+const API_CONFIG = globalThis.FutbinSyncApiConfig;
+let DEFAULT_API_BASE_URL = "";
+const MODULE_NAME = "latest";
+const STATE_KEY = "latestSyncState";
+const RECORDS_KEY = "latestPlayerRecords";
+const LOGS_KEY = "latestSyncLogs";
+const ERRORS_KEY = "latestSyncErrors";
+const EXTENSION_CONTENT = document.body.dataset.content || "coin-cards";
+const EXTENSION_OPERATIONS = (document.body.dataset.operations || EXTENSION_CONTENT)
+  .split(",")
+  .map((operation) => operation.trim())
+  .filter(Boolean);
 const elements = {
   apiEnvironmentButtons: [...document.querySelectorAll(".environment-button")],
   waitMs: $("#waitMs"),
@@ -35,9 +46,9 @@ let currentRootState = {};
 let currentRecords = [];
 let currentLogs = [];
 let currentErrors = [];
-let currentContentTab = "web-app-sync";
-let currentListTab = "web-app-sync";
-let selectedApiBaseUrl = LOCAL_API_BASE_URL;
+let currentContentTab = EXTENSION_CONTENT;
+let currentListTab = EXTENSION_CONTENT;
+let selectedApiBaseUrl = DEFAULT_API_BASE_URL;
 const collapsedCoinSections = new Set();
 const collapsedCycleGroups = new Set();
 const expandedCycleGroups = new Set();
@@ -48,13 +59,16 @@ init();
 setInterval(renderCountdown, 250);
 
 async function init() {
+  await API_CONFIG.ready;
+  DEFAULT_API_BASE_URL = API_CONFIG.defaultBaseUrl();
+  selectedApiBaseUrl = DEFAULT_API_BASE_URL;
   const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncListTab", "syncContentTab", "syncActiveContentTabs"]);
-  setApiEnvironment(settings.syncApiBaseUrl || LOCAL_API_BASE_URL);
+  setApiEnvironment(DEFAULT_API_BASE_URL);
   setActiveContentTabs(settings.syncActiveContentTabs);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
-  setContentTab(settings.syncContentTab || contentNameForList(settings.syncListTab) || "web-app-sync");
-  const snapshot = await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" });
-  render(snapshot.syncState || {}, snapshot.playerRecords || [], snapshot.syncLogs || [], snapshot.syncErrors || []);
+  setContentTab(settings.syncContentTab || contentNameForList(settings.syncListTab) || EXTENSION_CONTENT);
+  const snapshot = await chrome.runtime.sendMessage({ futbinSyncModule: MODULE_NAME, type: "GET_SNAPSHOT" });
+  render(snapshot[STATE_KEY] || {}, snapshot[RECORDS_KEY] || [], snapshot[LOGS_KEY] || [], snapshot[ERRORS_KEY] || []);
 }
 
 elements.start.addEventListener("click", async () => {
@@ -70,6 +84,7 @@ elements.start.addEventListener("click", async () => {
   }
   await saveSettings();
   const response = await chrome.runtime.sendMessage({
+    futbinSyncModule: MODULE_NAME,
     type: "START_SYNC",
     apiBaseUrl: selectedApiBaseUrl,
     waitMs: Number(elements.waitMs.value),
@@ -84,19 +99,19 @@ elements.start.addEventListener("click", async () => {
 });
 
 elements.stop.addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "STOP_SYNC", operations: allSyncOperations() });
+  await chrome.runtime.sendMessage({ futbinSyncModule: MODULE_NAME, type: "STOP_SYNC", operations: allSyncOperations() });
   elements.start.style.display = "";
   elements.stop.style.display = "none";
 });
 
 elements.clear.addEventListener("click", async () => {
   if (!confirm("Tarama ilerlemesi ve gösterilen oyuncular temizlensin mi?")) return;
-  await chrome.runtime.sendMessage({ type: "CLEAR_SYNC", apiBaseUrl: selectedApiBaseUrl });
+  await chrome.runtime.sendMessage({ futbinSyncModule: MODULE_NAME, type: "CLEAR_SYNC", apiBaseUrl: selectedApiBaseUrl });
 });
 
 elements.apiEnvironmentButtons.forEach((button) => {
   button.addEventListener("click", async () => {
-    setApiEnvironment(button.dataset.apiBaseUrl);
+    setApiEnvironment(API_CONFIG.baseUrlFor(button.dataset.apiEnv));
     await saveSettings();
   });
 });
@@ -122,19 +137,24 @@ elements.contentTabCheckboxes.forEach((checkbox) => {
 });
 
 function setListTab(listName, title) {
-  currentListTab = listName || "web-app-sync";
+  currentListTab = listName || EXTENSION_CONTENT;
   if (elements.listTitle) {
-    elements.listTitle.textContent = title || currentAction().defaultTitle || "Web App Sync";
+    elements.listTitle.textContent = title || currentAction().defaultTitle || document.body.dataset.title || "Latest Player Sync";
   }
 }
 
 function setContentTab(contentName) {
+  if (!elements.contentTabs.length) {
+    currentContentTab = EXTENSION_CONTENT;
+    setListTab(EXTENSION_CONTENT, document.body.dataset.title || EXTENSION_CONTENT);
+    return;
+  }
   const selectedTab = elements.contentTabs.find((tab) => tab.dataset.content === contentName) ||
-    elements.contentTabs.find((tab) => tab.dataset.content === "web-app-sync") ||
+    elements.contentTabs.find((tab) => tab.dataset.content === EXTENSION_CONTENT) ||
     elements.contentTabs[0];
-  const selectedContent = selectedTab?.dataset.content || "web-app-sync";
+  const selectedContent = selectedTab?.dataset.content || EXTENSION_CONTENT;
   currentContentTab = selectedContent;
-  setListTab(selectedTab?.dataset.list || "web-app-sync", selectedTab?.textContent?.trim());
+  setListTab(selectedTab?.dataset.list || EXTENSION_CONTENT, selectedTab?.textContent?.trim());
 
   elements.contentTabs.forEach((tab) => {
     const isSelected = tab.dataset.content === selectedContent;
@@ -144,12 +164,12 @@ function setContentTab(contentName) {
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local" || (!changes.syncState && !changes.playerRecords && !changes.syncLogs && !changes.syncErrors)) return;
+  if (area !== "local" || (!changes[STATE_KEY] && !changes[RECORDS_KEY] && !changes[LOGS_KEY] && !changes[ERRORS_KEY])) return;
   Promise.all([
-    changes.syncState ? changes.syncState.newValue : chrome.storage.local.get("syncState").then((x) => x.syncState),
-    changes.playerRecords ? changes.playerRecords.newValue : chrome.storage.local.get("playerRecords").then((x) => x.playerRecords || []),
-    changes.syncLogs ? changes.syncLogs.newValue : chrome.storage.local.get("syncLogs").then((x) => x.syncLogs || []),
-    changes.syncErrors ? changes.syncErrors.newValue : chrome.storage.local.get("syncErrors").then((x) => x.syncErrors || [])
+    changes[STATE_KEY] ? changes[STATE_KEY].newValue : chrome.storage.local.get(STATE_KEY).then((x) => x[STATE_KEY]),
+    changes[RECORDS_KEY] ? changes[RECORDS_KEY].newValue : chrome.storage.local.get(RECORDS_KEY).then((x) => x[RECORDS_KEY] || []),
+    changes[LOGS_KEY] ? changes[LOGS_KEY].newValue : chrome.storage.local.get(LOGS_KEY).then((x) => x[LOGS_KEY] || []),
+    changes[ERRORS_KEY] ? changes[ERRORS_KEY].newValue : chrome.storage.local.get(ERRORS_KEY).then((x) => x[ERRORS_KEY] || [])
   ]).then(([state, records, logs, errors]) => render(state, records, logs, errors));
 });
 
@@ -161,7 +181,7 @@ elements.logs.addEventListener("click", (event) => {
   if (url) chrome.tabs.create({ url, active: true });
 });
 
-elements.records.addEventListener("click", (event) => {
+elements.records?.addEventListener("click", (event) => {
   const cycleToggle = event.target.closest(".cycle-group-toggle");
   if (cycleToggle) {
     const cycleKey = cycleToggle.dataset.cycleKey;
@@ -181,7 +201,7 @@ elements.records.addEventListener("click", (event) => {
   if (currentAction().handleRecordClick?.(event, actionContext())) return;
   openSyncRow(event);
 });
-elements.records.addEventListener("keydown", (event) => {
+elements.records?.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
   openSyncRow(event);
 });
@@ -211,6 +231,7 @@ function selectedOperations() {
 }
 
 function currentTabOperations() {
+  if (!elements.contentTabs.length) return EXTENSION_OPERATIONS;
   return (selectedContentTab()?.dataset.operations || "")
     .split(",")
     .map((operation) => operation.trim())
@@ -218,6 +239,7 @@ function currentTabOperations() {
 }
 
 function allSyncOperations() {
+  if (!elements.contentTabs.length) return EXTENSION_OPERATIONS;
   return [...new Set(elements.contentTabs.flatMap((tab) =>
     (isContentTabActive(tab.dataset.content) ? tab.dataset.operations || "" : "")
       .split(",")
@@ -227,6 +249,7 @@ function allSyncOperations() {
 }
 
 function setActiveContentTabs(activeTabs) {
+  if (!elements.contentTabCheckboxes.length) return;
   const activeSet = Array.isArray(activeTabs)
     ? new Set(activeTabs)
     : new Set(elements.contentTabs
@@ -246,12 +269,20 @@ function activeContentTabs() {
 }
 
 function isContentTabActive(contentName) {
+  if (!elements.contentTabCheckboxes.length) return contentName === EXTENSION_CONTENT;
   return elements.contentTabCheckboxes.some((checkbox) =>
     checkbox.dataset.contentActive === contentName && checkbox.checked && contentTabHasOperation(contentName));
 }
 
 function contentTabByName(contentName) {
-  return elements.contentTabs.find((tab) => tab.dataset.content === contentName);
+  return elements.contentTabs.find((tab) => tab.dataset.content === contentName) || {
+    dataset: {
+      content: EXTENSION_CONTENT,
+      list: EXTENSION_CONTENT,
+      operations: EXTENSION_OPERATIONS.join(",")
+    },
+    textContent: document.body.dataset.title || EXTENSION_CONTENT
+  };
 }
 
 function contentTabHasOperation(contentName) {
@@ -263,20 +294,37 @@ function selectedContentTab() {
 }
 
 function contentNameForList(listName) {
-  return elements.contentTabs.find((tab) => tab.dataset.list === listName)?.dataset.content;
+  return elements.contentTabs.find((tab) => tab.dataset.list === listName)?.dataset.content || EXTENSION_CONTENT;
 }
 
 function setApiEnvironment(apiBaseUrl) {
-  selectedApiBaseUrl = apiBaseUrl || LOCAL_API_BASE_URL;
+  selectedApiBaseUrl = API_CONFIG.allowedBaseUrl(apiBaseUrl || API_CONFIG.defaultBaseUrl());
   elements.apiEnvironmentButtons.forEach((button) => {
-    const isActive = button.dataset.apiBaseUrl === selectedApiBaseUrl;
+    const buttonApiBaseUrl = API_CONFIG.baseUrlFor(button.dataset.apiEnv);
+    const isActive = buttonApiBaseUrl === selectedApiBaseUrl;
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-pressed", String(isActive));
   });
 }
 
 function currentAction() {
-  return actionRegistry[currentListTab] || actionRegistry["web-app-sync"];
+  return actionRegistry[currentListTab] || actionRegistry[EXTENSION_CONTENT] || emptyAction();
+}
+
+function emptyAction() {
+  return {
+    defaultTitle: document.body.dataset.title || EXTENSION_CONTENT,
+    statLabel: "Content",
+    hasSyncContent: false,
+    stateForView: (state) => state || {},
+    jobMatches: () => false,
+    entryMatches: () => false,
+    saveResultMatches: () => false,
+    currentPlayers: () => 0,
+    skippedCount: () => 0,
+    currentJobLabel: () => "İçerik hazır değil",
+    renderRecords: () => {}
+  };
 }
 
 function actionContext() {
@@ -349,9 +397,9 @@ function render(state = {}, records = [], logs = [], errors = []) {
           : "Hazır";
   elements.dot.classList.toggle("running", Boolean(viewState.running && action.hasSyncContent));
   elements.progress.style.width = totalJobs ? `${Math.min(100, currentJobNumber / totalJobs * 100)}%` : "0%";
-  elements.clubCount.textContent = `${Math.min(currentJobNumber, totalJobs)} / ${totalJobs}`;
-  elements.pageCount.textContent = activeJob ? `${viewState.currentPage || 0} / ${viewState.totalPages || 0}` : "0 / 0";
-  elements.recordCount.textContent = currentPlayers;
+  if (elements.clubCount) elements.clubCount.textContent = `${Math.min(currentJobNumber, totalJobs)} / ${totalJobs}`;
+  if (elements.pageCount) elements.pageCount.textContent = activeJob ? `${viewState.currentPage || 0} / ${viewState.totalPages || 0}` : "0 / 0";
+  if (elements.recordCount) elements.recordCount.textContent = currentPlayers;
   if (elements.runCount) elements.runCount.textContent = viewState.runCount || 0;
 
   const saveTotals = Object.entries(viewState.clubSaveResults || {}).reduce((totals, [key, result]) => {
@@ -363,14 +411,14 @@ function render(state = {}, records = [], logs = [], errors = []) {
       deleted: totals.deleted + (Number(result?.deleted) || 0)
     };
   }, { inserted: 0, updated: 0, deleted: 0 });
-  if (elements.clubCount.nextElementSibling) {
+  if (elements.clubCount?.nextElementSibling) {
     elements.clubCount.nextElementSibling.textContent = action.statLabel || "Content";
   }
 
   elements.insertedCount.textContent = saveTotals.inserted;
   elements.updatedCount.textContent = saveTotals.updated;
-  elements.deletedCount.textContent = saveTotals.deleted;
-  elements.skippedCount.textContent = action.skippedCount(viewState, activeJob);
+  if (elements.deletedCount) elements.deletedCount.textContent = saveTotals.deleted;
+  if (elements.skippedCount) elements.skippedCount.textContent = action.skippedCount(viewState, activeJob);
   elements.currentClub.textContent = action.currentJobLabel({ activeJob, viewState, currentJobNumber, totalJobs });
   if (viewState.running || viewState.userStarted) {
     elements.start.style.display = "none";
@@ -390,16 +438,6 @@ function render(state = {}, records = [], logs = [], errors = []) {
   elements.waitMs.disabled = Boolean(viewState.running || viewState.userStarted);
   showError(viewState.error || "");
   renderCountdown();
-  action.renderRecords({
-    records,
-    errors: displayErrors,
-    state: viewState,
-    elements,
-    helpers,
-    collapsedCoinSections,
-    collapsedLeagueGroups,
-    collapsedClubGroups
-  });
   renderLogs(displayLogs, displayErrors);
 }
 
@@ -413,7 +451,12 @@ function isCoinCardJob(job) {
 }
 
 function isCoinCardEntry(entry) {
+  const eventType = String(entry?.eventType || "");
   return Boolean(
+    eventType === "new-card-detected" ||
+    eventType === "card-updated" ||
+    eventType === "card-completed" ||
+    eventType === "card-processing" ||
     isCoinCardJob(entry?.job) ||
     String(entry?.url || "").includes("coin-card") ||
     String(entry?.leagueName || "").toLocaleLowerCase("tr-TR") === "coin cards"
@@ -428,14 +471,6 @@ function renderCountdown() {
   if (!currentAction().hasSyncContent) {
     elements.countdown.textContent = "İçerik yok";
     return;
-  }
-  if (currentListTab === "web-app-sync") {
-    const isActive = isContentTabActive("web-app-sync");
-    const isRunningOrStarted = currentState.running || currentState.userStarted;
-    if (!isActive || !isRunningOrStarted) {
-      elements.countdown.textContent = "Bekliyor";
-      return;
-    }
   }
   if (currentState.nextRunAt) {
     const remaining = Math.max(0, currentState.nextRunAt - Date.now());
@@ -557,38 +592,134 @@ function syncRowLinkAttributes(url) {
 }
 
 function renderLogs(logs, errors = []) {
-  elements.logCount.textContent = `${logs.length} kayıt`;
-  renderErrorLogs(errors);
-  if (!logs.length) {
+  const sortedLogs = [...logs].sort((left, right) => logEntryTime(right) - logEntryTime(left));
+  const sortedErrors = [...errors].sort((left, right) => logEntryTime(right) - logEntryTime(left));
+  const latestLog = sortedLogs[0];
+  const latestError = sortedErrors[0];
+  const logTime = Number(latestLog?.requestedAt) || 0;
+  const errorTime = Number(latestError?.occurredAt || latestError?.requestedAt) || 0;
+  const liveEntries = [];
+  if (errorTime > logTime) {
+    liveEntries.push({
+      ...latestError,
+      requestedAt: errorTime,
+      logType: "live-error",
+      step: latestError.stage || "ERROR",
+      message: latestError.message || "Bilinmeyen hata"
+    });
+  }
+  liveEntries.push(...sortedLogs);
+  const rows = collapseCompletedPlayerLogs(uniqueLogEntries(liveEntries)).slice(0, 80);
+  elements.logCount.textContent = rows.length ? "canlı" : "bekliyor";
+  renderErrorLogs([]);
+  if (!rows.length) {
     elements.logs.innerHTML = '<div class="logs-empty">Henüz request gönderilmedi.</div>';
     return;
   }
-  elements.logs.innerHTML = logs.map((entry) => {
-    const time = new Date(entry.requestedAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    if (entry.logType === "web-app-detail") {
-      const sequence = entry.sequence ? `#${String(entry.sequence).padStart(3, "0")} ` : "";
-      const details = formatLogDetails(entry.details);
-      return `<div class="request-log-link" title="${escapeHtml(details || entry.message || "")}">
+  elements.logs.innerHTML = rows.map(renderLogEntry).join("");
+}
+
+function renderLogEntry(entry) {
+  const entryTime = logEntryTime(entry) || Date.now();
+  const time = new Date(entryTime).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (entry.logType === "live-error") {
+    const sequence = entry.sequence ? `#${String(entry.sequence).padStart(3, "0")} ` : "";
+    const details = formatLogDetails(entry.details);
+    return `<div class="request-log-link" title="${escapeHtml(details || entry.message || "")}">
         <span class="request-log-time">${escapeHtml(time)}</span>
         <span class="request-log-body"><b>${escapeHtml(`${sequence}${entry.step || "FLOW"}`)}</b><small>${escapeHtml(entry.message || "")}${details ? ` · ${escapeHtml(details)}` : ""}</small></span>
       </div>`;
-    }
-    const label = `${entry.leagueName || "Lig"} → ${entry.clubName || "Kulüp"} · Sayfa ${entry.page || "—"}`;
-    return `<a class="request-log-link" href="#" data-url="${escapeHtml(entry.url || "")}" title="${escapeHtml(entry.url || "")}">
+  }
+  const label = entry.message || `${entry.leagueName || "Latest"} → ${entry.clubName || "Kart"} · Sayfa ${entry.page || "—"}`;
+  const isPlayerLog = entry.eventType === "new-card-detected" ||
+    entry.eventType === "card-updated" ||
+    entry.eventType === "card-completed" ||
+    entry.eventType === "card-processing";
+  const context = isPlayerLog
+    ? ""
+    : [entry.eventType, entry.page ? `Sayfa ${entry.page}` : "", entry.url].filter(Boolean).join(" · ");
+  const tagName = safeFutbinUrl(entry.url) ? "a" : "div";
+  return `<${tagName} class="request-log-link${isPlayerLog ? ` ${logEntryClass(entry)}` : ""}" href="#" data-url="${escapeHtml(entry.url || "")}" title="${escapeHtml(context || label)}">
+      ${isPlayerLog ? logEntryIcon(entry) : ""}
       <span class="request-log-time">${escapeHtml(time)}</span>
-      <span class="request-log-body"><b>${escapeHtml(label)}</b><small>${escapeHtml(entry.url || "")}</small></span>
-    </a>`;
-  }).join("");
+      <span class="request-log-body"><b>${escapeHtml(label)}</b><small>${escapeHtml(context)}</small></span>
+    </${tagName}>`;
+}
+
+function uniqueLogEntries(entries = []) {
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const key = entry.id || `${logEntryTime(entry)}:${entry.eventType || entry.logType || ""}:${entry.message || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function collapseCompletedPlayerLogs(entries = []) {
+  const completedKeys = new Set(entries
+    .filter((entry) => entry.eventType === "new-card-detected" ||
+      entry.eventType === "card-updated" ||
+      entry.eventType === "card-completed")
+    .map(playerLogKey)
+    .filter(Boolean));
+  return entries.filter((entry) => entry.eventType !== "card-processing" || !completedKeys.has(playerLogKey(entry)));
+}
+
+function playerLogKey(entry = {}) {
+  const url = safeFutbinUrl(entry.url);
+  if (url) return `url:${url}`;
+  const name = String(entry.playerName || entry.message || "").toLocaleLowerCase("tr-TR").trim();
+  const rating = entry.rating ? String(entry.rating) : "";
+  return name ? `player:${rating}:${name}` : "";
+}
+
+function logEntryClass(entry = {}) {
+  if (entry.eventType === "card-processing") return "log-processing";
+  if (entry.eventType === "new-card-detected" ||
+    entry.eventType === "card-updated" ||
+    entry.eventType === "card-completed") return "log-success";
+  return "";
+}
+
+function logEntryIcon(entry = {}) {
+  if (entry.eventType === "card-processing") {
+    return `<span class="request-log-icon request-log-spinner" aria-label="İşleniyor">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M21 12a9 9 0 0 0-9-9"></path></svg>
+    </span>`;
+  }
+  if (entry.eventType === "new-card-detected" ||
+    entry.eventType === "card-updated" ||
+    entry.eventType === "card-completed") {
+    return `<span class="request-log-icon request-log-success" aria-label="Başarılı">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m8 12 2.5 2.5L16 9"></path></svg>
+    </span>`;
+  }
+  return "";
+}
+
+function logEntryTime(entry = {}) {
+  return Number(entry.requestedAt || entry.occurredAt || entry.at || 0);
 }
 
 function formatLogDetails(details) {
   if (details === null || details === undefined || details === "") return "";
   if (typeof details === "string") return details;
-  try {
-    return JSON.stringify(details);
-  } catch {
-    return String(details);
+  if (typeof details !== "object") return String(details);
+  return Object.entries(details)
+    .map(([key, value]) => `${key}: ${formatLogDetailValue(value)}`)
+    .join(" · ");
+}
+
+function formatLogDetailValue(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (Array.isArray(value)) return value.map(formatLogDetailValue).join(", ");
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, nestedValue]) => `${key} ${formatLogDetailValue(nestedValue)}`)
+      .join(", ");
   }
+  return String(value);
 }
 
 function renderErrorLogs(errors = []) {

@@ -16,6 +16,7 @@ async function collectAndPublish(message) {
     const navigation = performance.getEntriesByType("navigation")[0];
     if (Number(navigation?.responseStatus) >= 400) {
       const result = await chrome.runtime.sendMessage({
+        futbinSyncModule: "latest",
         type: "SYNC_PAGE_FAILED",
         page: Number(message.page),
         pageUrl: location.href,
@@ -52,6 +53,7 @@ async function collectAndPublish(message) {
       ? 1
       : Number(message.page) === 1 ? extractTotalPages() : undefined;
     const result = await chrome.runtime.sendMessage({
+      futbinSyncModule: "latest",
       type: "SYNC_PAGE_RESULT",
       page: Number(message.page),
       pageUrl: location.href,
@@ -62,6 +64,7 @@ async function collectAndPublish(message) {
     scheduleAdvance(result);
   } catch (error) {
     await chrome.runtime.sendMessage({
+      futbinSyncModule: "latest",
       type: "SYNC_PAGE_CRITICAL",
       page: Number(message.page),
       pageUrl: location.href,
@@ -89,6 +92,7 @@ async function collectLatestCoinCardsAndPublish(message) {
   });
 
   const result = await chrome.runtime.sendMessage({
+    futbinSyncModule: "latest",
     type: "SYNC_PAGE_RESULT",
     page: Number(message.page) || 1,
     pageUrl: location.href,
@@ -126,23 +130,22 @@ function parseLatestCoinCardRow(row) {
     pricePc: priceFromNode(row.querySelector(".table-pc-price.platform-pc-text")) || null,
     maxPricePc: pcRange?.max ?? null
   };
-  assertCompleteCoinCardPrices(card);
+  assertValidLatestCoinCardPrices(card);
   return card;
 }
 
-function assertCompleteCoinCardPrices(card) {
-  const requiredPrices = [
-    ["Cross Price", card?.priceCross],
-    ["Cross Range Min", card?.minPriceCross],
-    ["Cross Range Max", card?.maxPriceCross],
-    ["PC Price", card?.pricePc],
-    ["PC Range Min", card?.minPricePc],
-    ["PC Range Max", card?.maxPricePc]
-  ];
-  const missing = requiredPrices
-    .filter(([, value]) => !Number.isFinite(Number(value)) || Number(value) <= 0)
-    .map(([label]) => label);
-  if (missing.length) throw new Error(`Eksik fiyat bilgisi nedeniyle atlandı: ${missing.join(", ")}`);
+function assertValidLatestCoinCardPrices(card) {
+  if (hasCompletePlatformPriceSet(card, "Cross") || hasCompletePlatformPriceSet(card, "Pc")) return;
+  throw new Error("Eksik fiyat bilgisi nedeniyle atlandı: Cross veya PC fiyat seti tamamlanmalı");
+}
+
+function hasCompletePlatformPriceSet(card, platform) {
+  const suffix = platform === "Cross" ? "Cross" : "Pc";
+  return [
+    card?.[`price${suffix}`],
+    card?.[`minPrice${suffix}`],
+    card?.[`maxPrice${suffix}`]
+  ].every((value) => Number.isFinite(Number(value)) && Number(value) > 0);
 }
 
 function parseLatestPriceRange(value) {
@@ -153,6 +156,7 @@ function parseLatestPriceRange(value) {
 
 async function collectCoinCardAndPublish(message) {
   const result = await chrome.runtime.sendMessage({
+    futbinSyncModule: "latest",
     type: "SYNC_PAGE_RESULT",
     page: 1,
     pageUrl: location.href,
@@ -224,9 +228,23 @@ function imageUrl(node) {
 }
 
 function scheduleAdvance(result) {
-  if (result?.action !== "WAIT_AND_ADVANCE" || !result.nextUrl) return;
+  if (result?.action !== "WAIT_AND_ADVANCE" || !result.nextUrl) {
+    console.log("[LatestPlayerSync Content] Geçiş planlanmadı", result);
+    return;
+  }
+  console.log("[LatestPlayerSync Content] Yedek geçiş zamanlayıcısı kuruldu", {
+    nextUrl: result.nextUrl,
+    waitMs: result.waitMs,
+    at: new Date().toISOString()
+  });
   setTimeout(() => {
-    chrome.runtime.sendMessage({ type: "ADVANCE_SYNC", url: result.nextUrl }).catch(() => {});
+    console.log("[LatestPlayerSync Content] Yedek geçiş isteği gönderiliyor", {
+      nextUrl: result.nextUrl,
+      at: new Date().toISOString()
+    });
+    chrome.runtime.sendMessage({ futbinSyncModule: "latest", type: "ADVANCE_SYNC", url: result.nextUrl })
+      .then((response) => console.log("[LatestPlayerSync Content] Geçiş yanıtı", response))
+      .catch((error) => console.error("[LatestPlayerSync Content] Geçiş mesajı gönderilemedi", error));
   }, Math.max(0, Number(result.waitMs) || 0));
 }
 

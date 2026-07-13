@@ -1,46 +1,57 @@
 {
   "manifest_version": 3,
-  "name": "Futbin Player Monitor",
-  "version": "0.3.0",
-  "description": "Backend kuyruğundaki lig ve kulüplerin Futbin oyuncularını tarayıp senkronize eder.",
-  "permissions": ["storage", "tabs", "alarms", "debugger"],
+  "name": "SBC FutbinSync",
+  "version": "1.0.0",
+  "description": "Futbin ve EA FC Web App senkronizasyonlarını tek dashboard üzerinden yönetir.",
+  "permissions": ["storage", "alarms", "offscreen", "tabs", "scripting", "debugger", "nativeMessaging"],
   "host_permissions": [
     "https://www.futbin.com/*",
     "https://futbin.com/*",
     "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*",
     "https://signin.ea.com/*",
-    "http://localhost:5055/*",
-    "https://api.sbcmonster.com/*"
+    "https://api.sbcmonster.com/*",
+    "http://localhost:5055/*"
   ],
   "background": {
     "service_worker": "src/background.js",
     "type": "module"
   },
-  "action": {
-    "default_title": "Futbin Player Monitor",
-    "default_popup": "src/popup.html"
-  },
   "content_scripts": [
     {
       "matches": ["https://www.futbin.com/*", "https://futbin.com/*"],
-      "js": ["src/content.js"],
+      "js": ["src/modules/latest/content.js"],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*", "https://signin.ea.com/*"],
+      "matches": ["https://www.futbin.com/*", "https://futbin.com/*"],
+      "js": ["src/modules/important/content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*",
+        "https://signin.ea.com/*"
+      ],
       "js": [
-        "src/actions/webAppSync/app.js",
-        "src/actions/webAppSync/sync_rarity.js",
-        "src/actions/webAppSync/sync_sbc.js",
-        "src/actions/webAppSync/core.js"
+        "src/modules/webapp/actions/webAppSync/app.js",
+        "src/modules/webapp/actions/webAppSync/sync_rarity.js",
+        "src/modules/webapp/actions/webAppSync/sync_sbc.js",
+        "src/modules/webapp/actions/webAppSync/core.js"
       ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": [".env"],
+      "resources": [
+        ".env",
+        "src/assets/img/appLogoSmall.png",
+        "src/modules/webapp/actions/webAppSync/page_api_bridge.js"
+      ],
       "matches": ["<all_urls>"]
     }
-  ]
+  ],
+  "action": {
+    "default_title": "SBC FutbinSync Dashboard"
+  }
 }

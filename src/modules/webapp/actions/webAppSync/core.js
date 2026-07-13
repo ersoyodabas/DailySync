@@ -1,6 +1,9 @@
 let webAppCollectionInProgress = false;
-const WEB_APP_RARITY_PHASE_KEY = "webAppRaritySyncPhase";
-const WEB_APP_FLOW_STATE_KEY = "webAppSyncFlowState";
+const WEB_APP_RARITY_PHASE_KEY = "webAppOnlyRaritySyncPhase";
+const WEB_APP_FLOW_STATE_KEY = "webAppOnlySyncFlowState";
+const FAST_POLL_INTERVAL_MS = 100;
+const SCREEN_SETTLE_DELAY_MS = 200;
+const LOGIN_BUTTON_GRACE_MS = 5000;
 const WEB_APP_LANGUAGE_CONFIG = {
   en: {
     label: "EN",
@@ -21,6 +24,9 @@ const webAppLog = (step, message, details) => {
   }
   return Promise.resolve();
 };
+const progressStep = (stepId, status, title, detail = null) => webAppLog("PROGRESS", title, {
+  progress: { stepId, status, title, detail }
+});
 
 const WEB_APP_SELECTORS = {
   loaded: "body > main > section > nav > button.ut-tab-bar-item.icon-settings",
@@ -64,6 +70,7 @@ window.FutbinSyncWebAppCore = {
   isElementVisible,
   normalize,
   sleep,
+  waitUntil,
   waitForVisibleElement,
   webAppLog
 };
@@ -90,12 +97,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function runWebAppSync(message) {
   try {
+    await progressStep(1, "progressing", "Web App açılıyor ve oturum kontrol ediliyor");
+    await webAppLog("FLOW", "[WEBAPP] Synchronization started");
     await webAppLog("FLOW", "Web App Sync işlemi başladı.");
     await waitForDocumentReady();
     webAppLog("FLOW", "Document hazır.", { readyState: document.readyState });
     let loadedButton = await ensureSignedIn();
+    await progressStep(1, "completed", "Web App açıldı ve oturum hazır");
     await webAppLog("LOGIN", "Login kontrolü tamamlandı; Home Page yüklendi.");
+    await progressStep(2, "progressing", "İngilizce dil kontrolü yapılıyor");
     loadedButton = await ensureInitialEnglishHomePageIfNeeded(loadedButton, message);
+    await progressStep(2, "completed", "İngilizce dil hazır");
     const raritySyncModule = window.FutbinSyncWebAppModules?.syncRarity;
     if (typeof raritySyncModule !== "function") {
       throw new Error("[CRITICAL] sync_rarity modülü yüklenmedi.");
@@ -108,6 +120,7 @@ async function runWebAppSync(message) {
     loadedButton = syncFlow.loadedButton || loadedButton;
     const raritySync = syncFlow.raritySync;
     const sbcSync = syncFlow.sbcSync;
+    const flowDecision = syncFlow.flowDecision;
     await clearWebAppFlowState();
     await clearRarityPhaseState();
     const loadedState = getLoadedSettingsState();
@@ -126,7 +139,9 @@ async function runWebAppSync(message) {
     window.FutbinSyncActions?.["web-app-sync"]?.modalHandler?.stopMonitoring();
 
     await webAppLog("RESULT", "Durdurma/tamamlanma sonucu background servisine gönderiliyor.");
+    await progressStep(9, "progressing", "Final log hazırlanıyor ve çalışma tamamlanıyor");
     await chrome.runtime.sendMessage({
+      futbinSyncModule: "webapp",
       type: "WEB_APP_SYNC_COMPLETE",
       page: Number(message.page) || 1,
       pageUrl: location.href,
@@ -140,6 +155,7 @@ async function runWebAppSync(message) {
         },
         raritySync,
         sbcSync,
+        flowDecision,
         locales: []
       },
       reason: "web-app-sync-complete"
@@ -151,6 +167,7 @@ async function runWebAppSync(message) {
       stack: error.stack
     });
     await chrome.runtime.sendMessage({
+      futbinSyncModule: "webapp",
       type: "SYNC_PAGE_CRITICAL",
       page: Number(message.page) || 1,
       pageUrl: location.href,
@@ -167,6 +184,7 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
   const sbcResults = { ...(flowState.sbcResults || flowState.sbcSync?.phases || {}) };
 
   if (!rarityResults.en) {
+    await progressStep(3, "progressing", "İngilizce rarity sync çalışıyor");
     await saveWebAppFlowState({
       runStartedAt,
       stage: "en_rarity_ready",
@@ -183,18 +201,21 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
     });
     await webAppLog("RARITY_FLOW", "EN Home Page hazır. EN rarity sync başlıyor.");
     rarityResults.en = await raritySyncModule("en");
+    await progressStep(3, "completed", "İngilizce rarity sync tamamlandı", `Yeni kayıt: ${Number(rarityResults.en?.savedCount) || 0}`);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "en_rarity_completed",
       rarityResults,
       sbcResults
     });
-    await webAppLog("RARITY_FLOW", "EN rarity sync tamamlandı.", summarizeRarityResult(rarityResults.en));
+    await webAppLog("RARITY_FLOW", `EN rarity sync tamamlandı. Yeni kayıt: ${Number(rarityResults.en?.savedCount) || 0}.`, summarizeRarityResult(rarityResults.en));
   } else {
+    await progressStep(3, "completed", "İngilizce rarity sync tamamlandı", `Yeni kayıt: ${Number(rarityResults.en?.savedCount) || 0}`);
     await webAppLog("RARITY_FLOW", "EN rarity sync bu run içinde zaten tamamlanmış; tekrar çalıştırılmadı.", summarizeRarityResult(rarityResults.en));
   }
 
   if (!sbcResults.en) {
+    await progressStep(4, "progressing", "İngilizce SBC sync çalışıyor");
     await saveWebAppFlowState({
       runStartedAt,
       stage: "en_sbc_ready",
@@ -202,7 +223,7 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
       sbcResults
     });
     loadedButton = await ensureHomePageLanguage(loadedButton, "en");
-    loadedButton = await waitForHomePageReadyForSbc("en");
+    loadedButton = await waitForHomePageReadyForSbc("en", 1000);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "en_sbc_running",
@@ -211,23 +232,38 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
     });
     await webAppLog("SBC_FLOW", "EN Home Page hazır. EN SBC sync başlıyor.");
     sbcResults.en = await sbcSyncModule("en");
+    await progressStep(4, "completed", "İngilizce SBC sync tamamlandı", `Yeni kayıt: ${Number(sbcResults.en?.insertedCount) || 0}`);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "en_sbc_completed",
       rarityResults,
       sbcResults
     });
-    await webAppLog("SBC_FLOW", "EN SBC sync tamamlandı.", summarizeSbcResult(sbcResults.en));
+    await webAppLog("SBC_FLOW", `EN SBC sync tamamlandı. Yeni kayıt: ${Number(sbcResults.en?.insertedCount) || 0}.`, summarizeSbcResult(sbcResults.en));
   } else {
+    await progressStep(4, "completed", "İngilizce SBC sync tamamlandı", `Yeni kayıt: ${Number(sbcResults.en?.insertedCount) || 0}`);
     await webAppLog("SBC_FLOW", "EN SBC sync bu run içinde zaten tamamlanmış; tekrar çalıştırılmadı.", summarizeSbcResult(sbcResults.en));
   }
 
   const enNewRarityCount = Number(rarityResults.en?.savedCount) || 0;
   const enNewSbcCount = Number(sbcResults.en?.insertedCount) || 0;
-  const shouldRunTurkish = enNewRarityCount > 0 || enNewSbcCount > 0;
+  const shouldRunTurkish = enNewSbcCount > 0;
+  const shouldRunTurkishRarity = shouldRunTurkish && enNewRarityCount > 0;
+  const flowDecision = {
+    englishRarityNewCount: enNewRarityCount,
+    englishSbcNewCount: enNewSbcCount,
+    turkishRequired: shouldRunTurkish,
+    turkishRarityRequired: shouldRunTurkishRarity
+  };
+  await progressStep(5, "completed", "Türkçe sync kararı verildi", shouldRunTurkish
+    ? `Yeni EN SBC: ${enNewSbcCount}; Türkçe aşamalar çalışacak`
+    : "Yeni EN SBC yok; Türkçe aşamalar atlanacak");
 
   if (!shouldRunTurkish) {
-    await webAppLog("FLOW", "EN rarity ve EN SBC tarafında yeni kayıt yok. TR diline geçilmeyecek; Web App Sync tamamlanacak.", {
+    await progressStep(6, "skipped", "Türkçe dil geçişi atlandı", "Yeni EN SBC kaydı yok");
+    await progressStep(7, "skipped", "Türkçe rarity sync atlandı", "Türkçe aşama gerekli değil");
+    await progressStep(8, "skipped", "Türkçe SBC sync atlandı", "Yeni EN SBC kaydı yok");
+    await webAppLog("FLOW", "EN SBC tarafında yeni kayıt yok. TR diline geçilmeyecek; Web App Sync tamamlanacak.", {
       enNewRarityCount,
       enNewSbcCount,
       currentSettingsText: getLoadedSettingsState()?.text || null
@@ -235,16 +271,46 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
     return {
       loadedButton,
       raritySync: combineRarityResults(rarityResults),
-      sbcSync: combineSbcResults(sbcResults)
+      sbcSync: combineSbcResults(sbcResults),
+      flowDecision
     };
   }
 
-  await webAppLog("FLOW", "EN tarafında yeni kayıt algılandı. TR diline geçilip rarity ve SBC sync tekrar çalıştırılacak.", {
+  await webAppLog("FLOW", "EN tarafında yeni SBC kaydı algılandı. TR diline geçilecek.", {
     enNewRarityCount,
-    enNewSbcCount
+    enNewSbcCount,
+    turkishRarityRequired: shouldRunTurkishRarity
   });
+  await progressStep(6, "progressing", "Türkçe diline geçiliyor");
+  // Dil seçimi EA Web App'i tamamen yeniliyor. Yenilenen content script'in
+  // Türkçe ekranı yeni bir başlangıç sanıp tekrar İngilizceye çevirmemesi için
+  // geçiş niyetini tıklamadan önce kalıcılaştır.
+  await saveWebAppFlowState({
+    runStartedAt,
+    stage: "tr_language_switching",
+    rarityResults,
+    sbcResults
+  });
+  console.info("[WebAppSync][LANGUAGE] Türkçe dil geçişi başlatılıyor.", {
+    stage: "tr_language_switching",
+    expectedSettingsText: WEB_APP_LANGUAGE_CONFIG.tr.settingsText,
+    currentSettingsText: getLoadedSettingsState()?.text || null
+  });
+  loadedButton = await ensureHomePageLanguage(loadedButton, "tr");
+  await saveWebAppFlowState({
+    runStartedAt,
+    stage: "tr_language_ready",
+    rarityResults,
+    sbcResults
+  });
+  console.info("[WebAppSync][LANGUAGE] Türkçe Home Page doğrulandı; Türkçe sync devam edecek.", {
+    stage: "tr_language_ready",
+    detectedSettingsText: getLoadedSettingsState()?.text || null
+  });
+  await progressStep(6, "completed", "Türkçe dil hazır");
 
-  if (!rarityResults.tr) {
+  if (shouldRunTurkishRarity && !rarityResults.tr) {
+    await progressStep(7, "progressing", "Türkçe rarity sync çalışıyor");
     await saveWebAppFlowState({
       runStartedAt,
       stage: "tr_rarity_ready",
@@ -261,18 +327,26 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
     });
     await webAppLog("RARITY_FLOW", "TR Home Page hazır. TR rarity sync başlıyor.");
     rarityResults.tr = await raritySyncModule("tr");
+    await progressStep(7, "completed", "Türkçe rarity sync tamamlandı", `Yeni kayıt: ${Number(rarityResults.tr?.savedCount) || 0}`);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "tr_rarity_completed",
       rarityResults,
       sbcResults
     });
-    await webAppLog("RARITY_FLOW", "TR rarity sync tamamlandı.", summarizeRarityResult(rarityResults.tr));
-  } else {
+    await webAppLog("RARITY_FLOW", `TR rarity sync tamamlandı. Yeni kayıt: ${Number(rarityResults.tr?.savedCount) || 0}.`, summarizeRarityResult(rarityResults.tr));
+  } else if (shouldRunTurkishRarity) {
+    await progressStep(7, "completed", "Türkçe rarity sync tamamlandı", `Yeni kayıt: ${Number(rarityResults.tr?.savedCount) || 0}`);
     await webAppLog("RARITY_FLOW", "TR rarity sync bu run içinde zaten tamamlanmış; tekrar çalıştırılmadı.", summarizeRarityResult(rarityResults.tr));
+  } else {
+    await progressStep(7, "skipped", "Türkçe rarity sync atlandı", "İngilizce rarity aşamasında yeni kayıt yok");
+    await webAppLog("RARITY_FLOW", "EN rarity aşamasında yeni kayıt bulunmadığı için TR rarity sync atlandı.", {
+      enNewRarityCount
+    });
   }
 
   if (!sbcResults.tr) {
+    await progressStep(8, "progressing", "Türkçe SBC sync çalışıyor");
     await saveWebAppFlowState({
       runStartedAt,
       stage: "tr_sbc_ready",
@@ -280,7 +354,7 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
       sbcResults
     });
     loadedButton = await ensureHomePageLanguage(loadedButton, "tr");
-    loadedButton = await waitForHomePageReadyForSbc("tr");
+    loadedButton = await waitForHomePageReadyForSbc("tr", 1000);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "tr_sbc_running",
@@ -289,21 +363,24 @@ async function runWebAppLanguageSyncFlow(initialLoadedButton, raritySyncModule, 
     });
     await webAppLog("SBC_FLOW", "TR Home Page hazır. TR SBC sync başlıyor.");
     sbcResults.tr = await sbcSyncModule("tr");
+    await progressStep(8, "completed", "Türkçe SBC sync tamamlandı", `Yeni kayıt: ${Number(sbcResults.tr?.insertedCount) || 0}`);
     await saveWebAppFlowState({
       runStartedAt,
       stage: "tr_sbc_completed",
       rarityResults,
       sbcResults
     });
-    await webAppLog("SBC_FLOW", "TR SBC sync tamamlandı.", summarizeSbcResult(sbcResults.tr));
+    await webAppLog("SBC_FLOW", `TR SBC sync tamamlandı. Yeni kayıt: ${Number(sbcResults.tr?.insertedCount) || 0}.`, summarizeSbcResult(sbcResults.tr));
   } else {
+    await progressStep(8, "completed", "Türkçe SBC sync tamamlandı", `Yeni kayıt: ${Number(sbcResults.tr?.insertedCount) || 0}`);
     await webAppLog("SBC_FLOW", "TR SBC sync bu run içinde zaten tamamlanmış; tekrar çalıştırılmadı.", summarizeSbcResult(sbcResults.tr));
   }
 
   return {
     loadedButton,
     raritySync: combineRarityResults(rarityResults),
-    sbcSync: combineSbcResults(sbcResults)
+    sbcSync: combineSbcResults(sbcResults),
+    flowDecision
   };
 }
 
@@ -352,6 +429,12 @@ async function ensureInitialEnglishHomePageIfNeeded(loadedButton, message) {
     turkishRarityPhaseResume: isTurkishRarityPhaseResume,
     turkishFlowResume: isTurkishFlowResume
   });
+  console.info("[WebAppSync][LANGUAGE] Yenilenen sayfanın dil/akış durumu algılandı.", {
+    detectedSettingsText: loadedState.text,
+    runStartedAt,
+    storedFlowStage: flowState?.stage || null,
+    sameRunTurkishFlow: isTurkishFlowResume
+  });
 
   if (loadedState.text !== "ayarlar") {
     await webAppLog("LANGUAGE", "İlk Home Page İngilizce algılandı; başlangıç dil değişikliği gerekmiyor.", {
@@ -369,6 +452,10 @@ async function ensureInitialEnglishHomePageIfNeeded(loadedButton, message) {
   }
 
   if (isTurkishFlowResume) {
+    console.info("[WebAppSync][LANGUAGE] Türkçe faz kaldığı yerden devam ediyor; yeniden dil değiştirilmeyecek.", {
+      detectedSettingsText: loadedState.text,
+      storedFlowStage: flowState.stage
+    });
     await webAppLog("LANGUAGE", "Türkçe Home Page, Web App Sync TR fazı olarak algılandı; tekrar İngilizceye çevrilmeyecek.", {
       storedFlowStage: flowState.stage
     });
@@ -408,6 +495,11 @@ async function ensureHomePageLanguage(loadedButton, targetLang) {
   }
 
   const currentText = loadedState.text;
+  console.info("[WebAppSync][LANGUAGE] Home Page dil kontrolü.", {
+    targetLanguage: targetLang,
+    expectedSettingsText: targetConfig.settingsText,
+    detectedSettingsText: currentText
+  });
   webAppLog("LANGUAGE", "Home Page dili Settings elementi üzerinden kontrol ediliyor.", {
     selector: WEB_APP_SELECTORS.loaded,
     text: currentText,
@@ -485,7 +577,7 @@ async function waitForLanguageOption(targetText, timeout = 30000) {
 async function waitForHomePageAfterLanguageChange(targetLang) {
   const targetConfig = WEB_APP_LANGUAGE_CONFIG[targetLang] || WEB_APP_LANGUAGE_CONFIG.en;
   const timeout = 60000;
-  const interval = 1000;
+  const interval = FAST_POLL_INTERVAL_MS;
   const startedAt = Date.now();
   let checkCount = 0;
 
@@ -493,6 +585,13 @@ async function waitForHomePageAfterLanguageChange(targetLang) {
     checkCount += 1;
     const loadedState = getLoadedSettingsState();
     if (loadedState?.text === targetConfig.settingsText) {
+      console.info("[WebAppSync][LANGUAGE] Dil değişimi sonrası hedef innerText algılandı.", {
+        targetLanguage: targetLang,
+        expectedSettingsText: targetConfig.settingsText,
+        detectedSettingsText: loadedState.text,
+        elapsedMs: Date.now() - startedAt,
+        checkCount
+      });
       await webAppLog("LANGUAGE", `${targetConfig.label} dili algılandı; ${targetConfig.languageName} Home Page yüklendi.`, {
         checkCount,
         elapsedMs: Date.now() - startedAt,
@@ -500,6 +599,16 @@ async function waitForHomePageAfterLanguageChange(targetLang) {
         language: targetLang
       });
       return loadedState.element;
+    }
+
+    if (checkCount === 1 || checkCount % 10 === 0) {
+      console.info("[WebAppSync][LANGUAGE] Hedef Settings/Ayarlar innerText bekleniyor.", {
+        targetLanguage: targetLang,
+        expectedSettingsText: targetConfig.settingsText,
+        detectedSettingsText: loadedState?.text || null,
+        elapsedMs: Date.now() - startedAt,
+        loaderActive: isClickShieldActive()
+      });
     }
 
     webAppLog("LANGUAGE", `${targetConfig.languageName} Home Page henüz yüklenmedi; yeniden kontrol edilecek.`, {
@@ -517,8 +626,8 @@ async function waitForHomePageAfterLanguageChange(targetLang) {
 
 async function waitForHomePageReadyForRarity(targetLang, timeout = 120000) {
   const targetConfig = WEB_APP_LANGUAGE_CONFIG[targetLang] || WEB_APP_LANGUAGE_CONFIG.en;
-  const interval = 1000;
-  const settleDelay = 700;
+  const interval = FAST_POLL_INTERVAL_MS;
+  const settleDelay = SCREEN_SETTLE_DELAY_MS;
   const startedAt = Date.now();
   let checkCount = 0;
 
@@ -564,8 +673,8 @@ async function waitForHomePageReadyForRarity(targetLang, timeout = 120000) {
 
 async function waitForHomePageReadyForSbc(targetLang, timeout = 120000) {
   const targetConfig = WEB_APP_LANGUAGE_CONFIG[targetLang] || WEB_APP_LANGUAGE_CONFIG.en;
-  const interval = 1000;
-  const settleDelay = 700;
+  const interval = FAST_POLL_INTERVAL_MS;
+  const settleDelay = SCREEN_SETTLE_DELAY_MS;
   const startedAt = Date.now();
   let checkCount = 0;
 
@@ -590,6 +699,11 @@ async function waitForHomePageReadyForSbc(targetLang, timeout = 120000) {
           settingsText: stableLoadedState.text,
           targetLanguage: targetLang,
           loaderActive: isClickShieldActive()
+        });
+        await webAppLog("SBC_FLOW", "[WEBAPP] Squad loaded", {
+          targetLanguage: targetLang,
+          elapsedMs: Date.now() - startedAt,
+          settingsText: stableLoadedState.text
         });
         return stableLoadedState.element;
       }
@@ -696,7 +810,9 @@ function summarizeSbcResult(result) {
     updatedCount: Number(result?.updatedCount) || 0,
     skippedCount: Number(result?.skippedCount) || 0,
     postedCount: Number(result?.postedCount) || 0,
-    failedCount: Number(result?.failedCount) || 0
+    failedCount: Number(result?.failedCount) || 0,
+    aborted: result?.aborted === true,
+    errorMessage: result?.errorMessage || null
   };
 }
 
@@ -719,6 +835,8 @@ function combineSbcResults(results) {
     skippedCount: sum("skippedCount"),
     postedCount: sum("postedCount"),
     failedCount: sum("failedCount"),
+    aborted: completedPhases.some((result) => result?.aborted === true),
+    errorMessage: completedPhases.map((result) => result?.errorMessage).filter(Boolean).join(" | ") || null,
     deletedCount: sum("deletedCount"),
     tileDeletedCount: sum("tileDeletedCount"),
     updatedSortCount: sum("updatedSortCount"),
@@ -753,7 +871,7 @@ async function ensureSignedIn() {
       selector: loadedBeforeEntryCheck.selector,
       detection: loadedBeforeEntryCheck.detection || "visible"
     });
-    return loadedBeforeEntryCheck.element;
+    return waitForAuthenticatedAppReady(loadedBeforeEntryCheck);
   }
 
   webAppLog("LOGIN", "Mevcut oturum veya giriş ekranı birlikte izleniyor.");
@@ -776,14 +894,14 @@ async function ensureSignedIn() {
       selector: loadedAfterEntryCheck.selector,
       detection: loadedAfterEntryCheck.detection || "visible"
     });
-    return loadedAfterEntryCheck.element;
+    return waitForAuthenticatedAppReady(loadedAfterEntryCheck);
   }
 
   if (entryState.state === "loaded") {
     await webAppLog("LOGIN", "Platformda oturum zaten açık. Email ve şifre adımları atlandı.", {
       text: entryState.text
     });
-    return entryState.element;
+    return waitForAuthenticatedAppReady(entryState);
   }
 
   if (entryState.state === "email" || entryState.state === "password") {
@@ -804,7 +922,7 @@ async function ensureSignedIn() {
       selector: loadedBeforeLoginClick.selector,
       detection: loadedBeforeLoginClick.detection || "visible"
     });
-    return loadedBeforeLoginClick.element;
+    return waitForAuthenticatedAppReady(loadedBeforeLoginClick);
   }
 
   webAppLog("LOGIN", "EA Web App login butonuna tıklanıyor.");
@@ -826,7 +944,7 @@ async function ensureSignedIn() {
     await webAppLog("LOGIN", "Mevcut oturum doğrulandı. Email ve şifre adımları atlandı.", {
       text: nextState.text
     });
-    return nextState.element;
+    return waitForAuthenticatedAppReady(nextState);
   }
 
   return completeEaLogin(nextState);
@@ -966,6 +1084,10 @@ async function waitForAppShell() {
 }
 
 async function waitForWebAppLoaded(timeout = 180000) {
+  await webAppLog("LOAD", "[WEBAPP] Waiting for WebApp", {
+    selector: WEB_APP_SELECTORS.loaded,
+    timeout
+  });
   webAppLog("LOAD", "Web App Settings/Ayarlar butonu bekleniyor.", {
     selector: WEB_APP_SELECTORS.loaded,
     timeout
@@ -979,18 +1101,36 @@ async function waitForWebAppLoaded(timeout = 180000) {
     text: normalize(loaded.textContent),
     url: location.href
   });
+  await webAppLog("LOAD", "[WEBAPP] WebApp loaded", {
+    selector: WEB_APP_SELECTORS.loaded,
+    text: normalize(loaded.textContent),
+    url: location.href
+  });
   return loaded;
+}
+
+async function waitForAuthenticatedAppReady(detectedState, timeout = 180000) {
+  const readyState = getLoadedSettingsState();
+  if (readyState) return readyState.element;
+
+  await webAppLog("LOAD", "Açık oturum algılandı; loader kapanıp Web App etkileşime hazır olana kadar bekleniyor.", {
+    selector: detectedState?.selector || WEB_APP_SELECTORS.loaded,
+    text: detectedState?.text || null,
+    detection: detectedState?.detection || "visible",
+    loaderActive: isClickShieldActive()
+  });
+  return waitForWebAppLoaded(timeout);
 }
 
 async function completeEaLogin(initialState = null) {
   await webAppLog("LOGIN", "EA login işlemi başladı.");
 
-  const loadedBeforeCredentials = getLoadedSettingsState();
+  const loadedBeforeCredentials = getLoadedSettingsState() || getLoadedSettingsStateLoose();
   if (loadedBeforeCredentials) {
     webAppLog("LOGIN", "Kimlik bilgileri işlenmeden önce açık oturum algılandı; login adımları atlandı.", {
       text: loadedBeforeCredentials.text
     });
-    return loadedBeforeCredentials.element;
+    return waitForAuthenticatedAppReady(loadedBeforeCredentials);
   }
 
   const credentials = await loadWebAppCredentials();
@@ -999,12 +1139,12 @@ async function completeEaLogin(initialState = null) {
     passwordPresent: Boolean(credentials.password)
   });
 
-  const loadedAfterCredentials = getLoadedSettingsState();
+  const loadedAfterCredentials = getLoadedSettingsState() || getLoadedSettingsStateLoose();
   if (loadedAfterCredentials) {
     webAppLog("LOGIN", "Kimlik bilgileri yüklenirken açık oturum ekranı geldi; login adımları iptal edildi.", {
       text: loadedAfterCredentials.text
     });
-    return loadedAfterCredentials.element;
+    return waitForAuthenticatedAppReady(loadedAfterCredentials);
   }
 
   if (initialState?.state !== "password") {
@@ -1044,6 +1184,7 @@ async function completeEaLogin(initialState = null) {
   const signInButton = await waitForVisibleElement(WEB_APP_SELECTORS.loginNextButton, 30000);
   if (!signInButton) throw new Error(`[CRITICAL] EA sign in butonu bulunamadı: ${WEB_APP_SELECTORS.loginNextButton}`);
   await webAppLog("LOGIN", "Şifre hazır. Sign In butonuna tıklanıyor.");
+  await notifyWebAppLoginSubmitted("password-submit");
   await futClick(signInButton);
   webAppLog("LOGIN", "Sign In tıklandı; hata kontrolü için 2 saniye bekleniyor.");
   await sleep(2000);
@@ -1075,6 +1216,7 @@ async function completeEaLogin(initialState = null) {
     webAppLog("LOGIN", "Retry şifresi set edildi ve doğrulandı.");
     await sleep(500);
     webAppLog("LOGIN", "Sign In butonuna ikinci kez tıklanıyor.");
+    await notifyWebAppLoginSubmitted("password-retry-submit");
     await futClick(retrySignInButton);
   }
 
@@ -1084,9 +1226,26 @@ async function completeEaLogin(initialState = null) {
   return loadedButton;
 }
 
+async function notifyWebAppLoginSubmitted(reason) {
+  try {
+    await chrome.runtime.sendMessage({
+      futbinSyncModule: "webapp",
+      type: "WEB_APP_LOGIN_SUBMITTED",
+      reason,
+      pageUrl: location.href,
+      submittedAt: Date.now()
+    });
+  } catch (error) {
+    webAppLog("LOGIN", "Sign In bildirimi background'a gönderilemedi; Settings bekleme akışı yine devam edecek.", {
+      reason,
+      message: error.message || String(error)
+    });
+  }
+}
+
 async function waitForSettingsAfterLogin() {
   const timeout = 120000;
-  const interval = 1000;
+  const interval = FAST_POLL_INTERVAL_MS;
   const startedAt = Date.now();
   let checkCount = 0;
 
@@ -1165,7 +1324,7 @@ async function waitForEmailStepTransition(timeout = 5000) {
 
 async function focusWebAppDocument() {
   webAppLog("INPUT", "Web App sekmesi ve penceresi odaklanıyor.");
-  const response = await chrome.runtime.sendMessage({ type: "FOCUS_WEB_APP_TAB" });
+  const response = await chrome.runtime.sendMessage({ futbinSyncModule: "webapp", type: "FOCUS_WEB_APP_TAB" });
   if (!response?.ok) {
     throw new Error(`[CRITICAL] Web App sekmesi odaklanamadı: ${response?.error || "Bilinmeyen hata"}`);
   }
@@ -1249,6 +1408,7 @@ async function realClickAndFocusInput(input) {
   });
 
   const response = await chrome.runtime.sendMessage({
+    futbinSyncModule: "webapp",
     type: "REAL_MOUSE_CLICK",
     x,
     y
@@ -1556,7 +1716,7 @@ async function waitForLoadedSettingsButton(timeout = 5000) {
 
 async function waitForWebAppEntryState(timeout = 120000) {
   const startedAt = Date.now();
-  const loginButtonGraceMs = 5000;
+  const loginButtonGraceMs = LOGIN_BUTTON_GRACE_MS;
   let loginButtonCandidate = null;
   let loginButtonDetectedAt = 0;
   webAppLog("WAIT", "Settings/Ayarlar hedefi ve login ekranı paralel izleniyor.", {
@@ -1624,7 +1784,7 @@ async function waitForWebAppAuthState(timeout = 120000) {
   });
 
   while (Date.now() - startedAt < timeout) {
-    const loadedState = getLoadedSettingsState();
+    const loadedState = getLoadedSettingsState() || getLoadedSettingsStateLoose();
     if (loadedState) return loadedState;
 
     const passwordInput = findVisibleElement(WEB_APP_SELECTORS.passwordInput);
@@ -1667,7 +1827,6 @@ function getLoadedSettingsState() {
 }
 
 function getLoadedSettingsStateLoose() {
-  if (isClickShieldActive()) return null;
   const loadedButton = document.querySelector(WEB_APP_SELECTORS.loaded);
   const loadedText = normalize(loadedButton?.innerText || loadedButton?.textContent).toLowerCase();
   if (!loadedButton || (loadedText !== "settings" && loadedText !== "ayarlar")) return null;
@@ -1677,7 +1836,7 @@ function getLoadedSettingsStateLoose() {
     selector: WEB_APP_SELECTORS.loaded,
     element: loadedButton,
     text: loadedText,
-    detection: "dom-text"
+    detection: isClickShieldActive() ? "dom-text-with-loader" : "dom-text"
   };
 }
 

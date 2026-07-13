@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SBC FutbinSync</title>
+    <link rel="stylesheet" href="src/dashboard.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="dashboard" class="dashboard" aria-label="FutbinSync dashboard"></section>
+    </main>
+
+    <template id="panelTemplate">
+      <article class="sync-panel">
+        <div class="panel-glow"></div>
+        <header class="panel-header">
+          <div class="panel-title-row">
+            <div class="module-icon"></div>
+            <div class="module-copy">
+              <h2></h2>
+            </div>
+            <div class="panel-controls">
+              <button class="ghost clear" type="button"></button>
+              <button class="ghost extra" type="button"></button>
+              <button class="primary start" type="button"></button>
+              <button class="danger stop" type="button"></button>
+            </div>
+          </div>
+        </header>
+
+        <div class="status-block">
+          <p class="status-text">Durum okunuyor</p>
+          <span class="countdown" hidden><span class="countdown-icon"></span><strong class="countdown-value"></strong></span>
+        </div>
+
+        <div class="progress-wrap">
+          <span class="progress-bar"></span>
+        </div>
+
+        <div class="metric-grid"></div>
+
+        <section class="activity">
+          <div class="section-title">
+            <span class="section-label"><span class="section-icon logs-icon"></span><span>Canlı Log</span></span>
+            <b class="log-count">0</b>
+          </div>
+          <div class="logs"></div>
+        </section>
+
+        <section class="activity issues">
+          <div class="section-title">
+            <span class="section-label"><span class="section-icon errors-icon"></span><span>Hatalar</span></span>
+            <b class="error-count">0</b>
+          </div>
+          <div class="errors"></div>
+        </section>
+      </article>
+    </template>
+
+    <script src="src/config/api.js"></script>
+    <script src="src/dashboard.js"></script>
+  </body>
+</html>
