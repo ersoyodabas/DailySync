@@ -448,11 +448,16 @@ async function ensureOffscreen() {
 function toPayloadPlayer(raw) {
   const rarityInfo = inferRarity(raw);
   const qualityCode = inferQualityCode(raw, rarityInfo);
+  const name = cleanPayloadPlayerName(raw.name);
+  const fullName = cleanPayloadPlayerName(raw.fullName || raw.name) || name;
   for (const [label, value] of [
     ["futbin_player_id", raw.futbinPlayerId],
     ["futbin_club_id", raw.futbinClubId],
     ["futbin_league_id", raw.futbinLeagueId],
     ["futbin_nation_id", raw.futbinNationId],
+    ["name", name],
+    ["full_name", fullName],
+    ["rating", raw.rating],
     ["position_name", raw.positionName],
     ["quality_code", qualityCode]
   ]) {
@@ -468,8 +473,8 @@ function toPayloadPlayer(raw) {
     futbin_league_id: Number(raw.futbinLeagueId),
     futbin_nation_id: Number(raw.futbinNationId),
     futbin_rarity_id: Number(rarityInfo.futbinId),
-    name: raw.name,
-    full_name: raw.fullName || raw.name,
+    name,
+    full_name: fullName,
     rating: raw.rating,
     futbin_player_id: raw.futbinPlayerId,
     futbin_player_link: raw.futbinPlayerLink,
@@ -489,6 +494,13 @@ function toPayloadPlayer(raw) {
     alternative_positions: (raw.alternativePositions || []).join(","),
     active: true
   };
+}
+function cleanPayloadPlayerName(value) {
+  const normalized = String(value || "")
+    .replace(/\b(?:[4-9]\d|1\d{2})\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /[A-Za-zÀ-ž]/.test(normalized) ? normalized : "";
 }
 function inferRarity(raw) {
   const file = String(raw.cardImageUrl || "").split("/").pop()?.split("?")[0] || "";

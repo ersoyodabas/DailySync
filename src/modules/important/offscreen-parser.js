@@ -40,8 +40,11 @@ function parsePlayerRow(row) {
   const nationImg = nationLink?.querySelector("img") || row.querySelector("td.table-name img.nation");
   const cardImg = row.querySelector("td.table-name img[class*='bg'], td.table-name img.playercard-s-26-bg");
   const playerImg = row.querySelector("td.table-name img[class*='special-img'], td.table-name img[src*='/img/players/'], td.table-name img[class*='base-img']");
+  const name = playerName(row, nameLink, playerImg);
+  const fullName = playerFullName(row, nameLink, name);
+  if (!name) throw new Error("Oyuncu ismi okunamadı");
   return {
-    futbinPlayerId: id, futbinPlayerLink: url, name: text(nameLink), fullName: text(nameLink),
+    futbinPlayerId: id, futbinPlayerLink: url, name, fullName,
     rating: integer(text(row.querySelector("td.table-rating"))), positionName: positions[0] || "",
     alternativePositions: positions.slice(1), priceConsole: price(text(row.querySelector("td.table-price.platform-ps-only, td.platform-ps-only"))),
     pricePc: price(text(row.querySelector("td.table-price.platform-pc-only, td.platform-pc-only"))),
@@ -52,6 +55,35 @@ function parsePlayerRow(row) {
     futbinNationId: assetId(nationImg, /\/nation\/(\d+)\./i) || queryId(nationLink, "nation"),
     cardImageUrl: image(cardImg), playerImageUrl: image(playerImg), nationImageUrl: image(nationImg), leagueImageUrl: image(leagueImg), clubImageUrl: image(clubImg)
   };
+}
+function playerName(row, nameLink, playerImg) {
+  return cleanPlayerName(
+    attr(playerImg, "alt") ||
+    attr(playerImg, "title") ||
+    attr(row.querySelector("img[class*='base-img'], img[class*='special-img'], img[src*='/img/players/']"), "alt") ||
+    attr(nameLink, "title") ||
+    attr(nameLink, "aria-label") ||
+    playerLinkText(nameLink)
+  );
+}
+function playerFullName(row, nameLink, fallback) {
+  return cleanPlayerName(
+    playerLinkText(nameLink) ||
+    attr(row.querySelector("a.table-player-name"), "title") ||
+    fallback
+  ) || fallback;
+}
+function playerLinkText(node) {
+  if (!node) return "";
+  const clone = node.cloneNode(true);
+  clone.querySelectorAll("img, svg, .rating-square, .table-rating, [class*='rating'], .table-pos, [class*='price']").forEach((child) => child.remove());
+  return text(clone);
+}
+function cleanPlayerName(value) {
+  return String(value || "")
+    .replace(/\b(?:[4-9]\d|1\d{2})\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 function price(value) {
   const token = String(value || "").toUpperCase().match(/(?:\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*[KM]?/i)?.[0];
@@ -66,4 +98,5 @@ function image(node) { return absolute(node?.getAttribute("src") || node?.getAtt
 function absolute(value) { try { return new URL(value || "", "https://www.futbin.com").href; } catch { return ""; } }
 function title(node) { return text({ textContent: node?.getAttribute("title") || node?.getAttribute("alt") }); }
 function text(node) { return String(node?.textContent || "").trim().replace(/\s+/g, " "); }
+function attr(node, name) { return String(node?.getAttribute(name) || "").trim(); }
 function integer(value) { return Number(String(value || "").match(/\d+/)?.[0]) || 0; }
