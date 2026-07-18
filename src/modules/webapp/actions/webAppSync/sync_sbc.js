@@ -612,6 +612,11 @@
           this.validateTileReqsBeforePost(sub, lang, `${label} > ${sub?.name?.[this.activeReqsLang(lang)] || sub?.name?.en || sub?.name?.tr || `Sub ${index + 1}`}`));
       },
 
+      isRecoverableTilePostFailure(counters) {
+        const stage = String(counters?.lastError?.stage || "");
+        return stage === "tile-sync-post" || stage === "tile-sync-post-exception";
+      },
+
       async postTileData(categoryId, sbcEntry, lang, counters) {
         if (!sbcEntry || (sbcEntry.exist && sbcEntry.force_update !== true)) {
           counters.skippedCount += 1;
@@ -660,12 +665,30 @@
           this.state.postedParentLookupKeys.add(parentLookupKey);
         }
 
-        const saveResult = await this.post("sbc/tile-sync", {
-          tile: tilePayload,
-          lang,
-          category_id: categoryId,
-          user_id: 1
-        });
+        let saveResult = null;
+        try {
+          saveResult = await this.post("sbc/tile-sync", {
+            tile: tilePayload,
+            lang,
+            category_id: categoryId,
+            user_id: 1
+          });
+        } catch (error) {
+          counters.failedCount += 1;
+          counters.lastError = {
+            stage: "tile-sync-post-exception",
+            categoryId,
+            lang,
+            name: sbcEntry.name,
+            group: tilePayload.group,
+            subs: tilePayload.subs?.length || 0,
+            playerCount: this.countTilePlayers(tilePayload),
+            message: error.message || String(error),
+            stack: error.stack || null
+          };
+          await this.log("SBC_ERROR", "SBC tile API isteği hata döndü; sonraki tile ile devam edilecek.", counters.lastError);
+          return false;
+        }
         if (saveResult?.result) {
           counters.insertedCount += Number(saveResult.data?.inserted) || 0;
           counters.updatedCount += Number(saveResult.data?.updated) || 0;
@@ -692,7 +715,8 @@
         };
         await this.log("SBC_ERROR", "SBC tile kayıt hatası.", {
           name: sbcEntry.name,
-          message: saveResult?.message || "Bilinmeyen hata"
+          message: saveResult?.message || "Bilinmeyen hata",
+          response: saveResult || null
         });
         return false;
       },
@@ -1143,10 +1167,22 @@
           reward: tile.querySelector(this.selectors.tileReward)?.innerText?.trim() || null
         })).filter((tile) => tile.name !== null);
 
-        const response = await this.post("sbc/sync-screen-data-by-category", {
-          category_id: Number(categoryId),
-          screen_tiles: tileInfos
-        });
+        let response = null;
+        try {
+          response = await this.post("sbc/sync-screen-data-by-category", {
+            category_id: Number(categoryId),
+            screen_tiles: tileInfos
+          });
+        } catch (error) {
+          await this.log("SBC_WARN", "Screen cleanup API isteği hata döndü; kategori sync devam edecek.", {
+            categoryId,
+            message: error.message || String(error),
+            stack: error.stack || null,
+            dbCount: Array.isArray(dbList) ? dbList.length : null,
+            lang
+          });
+          return null;
+        }
         if (response?.result) {
           counters.deletedCount += Number(response.data?.deleted_count ?? response.data?.deletedCount) || 0;
           counters.updatedSortCount += Number(response.data?.updated_sort_count ?? response.data?.updatedSortCount) || 0;
@@ -1411,6 +1447,15 @@
               repeatUpdateEntry.subs = [];
               const postResult = await this.postTileData(categoryId, repeatUpdateEntry, normalizedLang, counters);
               if (!postResult) {
+                if (this.isRecoverableTilePostFailure(counters)) {
+                  await this.log("SBC_WARN", "Repeatable tile kayıt isteği başarısız oldu; sonraki tile ile devam edilecek.", {
+                    categoryName,
+                    name,
+                    lastError: counters.lastError || null
+                  });
+                  tileIndex += 1;
+                  continue;
+                }
                 invalidReason = `Repeatable tile kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
@@ -1458,6 +1503,15 @@
               }
               const postResult = await this.postTileData(categoryId, sbcEntry, normalizedLang, counters);
               if (!postResult) {
+                if (this.isRecoverableTilePostFailure(counters)) {
+                  await this.log("SBC_WARN", "Group SBC tile-sync isteği başarısız oldu; sonraki tile ile devam edilecek.", {
+                    categoryName,
+                    name,
+                    lastError: counters.lastError || null
+                  });
+                  tileIndex += 1;
+                  continue;
+                }
                 invalidReason = `Group SBC tile-sync kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;
@@ -1512,6 +1566,15 @@
               }
               const postResult = await this.postTileData(categoryId, sbcEntry, normalizedLang, counters);
               if (!postResult) {
+                if (this.isRecoverableTilePostFailure(counters)) {
+                  await this.log("SBC_WARN", "Single SBC tile-sync isteği başarısız oldu; sonraki tile ile devam edilecek.", {
+                    categoryName,
+                    name,
+                    lastError: counters.lastError || null
+                  });
+                  tileIndex += 1;
+                  continue;
+                }
                 invalidReason = `Single SBC tile-sync kayıt isteği başarısız: ${categoryName} > ${name}`;
                 hasInvalidTile = true;
                 break;

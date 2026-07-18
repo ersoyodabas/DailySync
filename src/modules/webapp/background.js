@@ -1499,14 +1499,24 @@ async function handleWebAppSyncComplete(message, sender) {
     (!decision.turkishRequired || snapshot.sbcSync?.phases?.tr) &&
     (!decision.turkishRarityRequired || snapshot.raritySync?.phases?.tr)
   );
-  const failedCount = Number(snapshot.sbcSync?.failedCount) || 0;
   const aborted = snapshot.sbcSync?.aborted === true;
-  if (!hasRequiredPhases || failedCount > 0 || aborted) {
+  if (!hasRequiredPhases || aborted) {
     const reason = !hasRequiredPhases
       ? "Algoritmanın zorunlu rarity/SBC fazlarının tamamı bitmedi."
-      : (snapshot.sbcSync?.errorMessage || `${failedCount} SBC işlemi hata ile sonuçlandı.`);
+      : (snapshot.sbcSync?.errorMessage || "SBC sync kritik hata ile durdu.");
     await failSync(`Günlük başarı kaydı oluşturulmadı: ${reason}`, state);
     return { ok: false, error: reason };
+  }
+  const failedCount = Number(snapshot.sbcSync?.failedCount) || 0;
+  if (failedCount > 0) {
+    await appendWebAppSyncLog({
+      step: "SBC_WARN",
+      message: "Bazı SBC tile requestleri hata verdi; sync kalan işlemlerle tamamlandı.",
+      details: {
+        failedCount,
+        errorMessage: snapshot.sbcSync?.errorMessage || null
+      }
+    }, sender);
   }
   const saved = (Number(snapshot.raritySync?.savedCount) || 0) +
     (Number(snapshot.sbcSync?.savedCount) || 0);
