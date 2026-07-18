@@ -1073,31 +1073,62 @@ async function appendWebAppSchedulerLog(message, details = null) {
 async function notifyNewSbcsArrivedAfterWebAppSync(state) {
   const runStartedAt = Number(state?.runStartedAt) || 0;
   if (!runStartedAt) {
-    await appendWebAppSchedulerLog("Telegram notification skipped", {
-      reason: "runStartedAt not found"
-    });
+    const details = { reason: "runStartedAt not found" };
+    await appendWebAppSchedulerLog("Telegram notification skipped", details);
+    await appendTelegramNotifyLog("skipped", "Telegram notify request atlandı", details);
     return null;
   }
 
   const syncStartedAt = new Date(runStartedAt).toISOString();
+  const apiBaseUrl = await resolveApiBaseUrl(state.apiBaseUrl);
+  const request = {
+    method: "POST",
+    endpoint: NEW_SBC_TELEGRAM_ENDPOINT,
+    url: new URL(NEW_SBC_TELEGRAM_ENDPOINT, apiBaseUrl).href,
+    body: { syncStartedAt }
+  };
+  await appendTelegramNotifyLog("request", "Telegram notify request gönderiliyor", request);
+
   try {
-    const response = await apiRequest(await resolveApiBaseUrl(state.apiBaseUrl), NEW_SBC_TELEGRAM_ENDPOINT, {
+    const response = await apiRequest(apiBaseUrl, NEW_SBC_TELEGRAM_ENDPOINT, {
       method: "POST",
       body: JSON.stringify({ syncStartedAt })
     });
-    await appendWebAppSchedulerLog("Telegram notification completed", {
+    const details = {
       syncStartedAt,
       sent: response?.sent === true,
-      count: Number(response?.count) || 0
-    });
+      count: Number(response?.count) || 0,
+      status: response?.status || null,
+      items: Array.isArray(response?.items) ? response.items : [],
+      turkishChannel: response?.turkishChannel || null,
+      englishChannel: response?.englishChannel || null,
+      response
+    };
+    await appendWebAppSchedulerLog("Telegram notification completed", details);
+    await appendTelegramNotifyLog("response", "Telegram notify response alındı", details);
     return response;
   } catch (error) {
-    await appendWebAppSchedulerLog("Telegram notification failed", {
+    const details = {
       syncStartedAt,
-      message: error.message || String(error)
-    });
+      request,
+      message: error.message || String(error),
+      stack: error.stack || null
+    };
+    await appendWebAppSchedulerLog("Telegram notification failed", details);
+    await appendTelegramNotifyLog("error", "Telegram notify request başarısız", details);
     return null;
   }
+}
+
+async function appendTelegramNotifyLog(status, message, details) {
+  await appendWebAppSyncLog({
+    step: "TELEGRAM_NOTIFY",
+    message,
+    details: {
+      status,
+      ...details
+    }
+  }, {});
 }
 
 async function ensureWebAppDailySchedule() {
