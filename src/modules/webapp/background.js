@@ -1085,14 +1085,14 @@ async function notifyNewSbcsArrivedAfterWebAppSync(state) {
     method: "POST",
     endpoint: NEW_SBC_TELEGRAM_ENDPOINT,
     url: new URL(NEW_SBC_TELEGRAM_ENDPOINT, apiBaseUrl).href,
-    body: { syncStartedAt }
+    body: { sync_started_at: syncStartedAt }
   };
   await appendTelegramNotifyLog("request", "Telegram notify request gönderiliyor", request);
 
   try {
     const response = await apiRequest(apiBaseUrl, NEW_SBC_TELEGRAM_ENDPOINT, {
       method: "POST",
-      body: JSON.stringify({ syncStartedAt })
+      body: JSON.stringify({ sync_started_at: syncStartedAt })
     });
     const details = {
       syncStartedAt,
