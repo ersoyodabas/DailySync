@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "SBC FutbinSync",
+  "name": "Daily Sync",
   "version": "1.0.0",
   "description": "Futbin ve EA FC Web App senkronizasyonlarını tek dashboard üzerinden yönetir.",
   "permissions": ["storage", "alarms", "offscreen", "tabs", "scripting", "debugger", "nativeMessaging"],
@@ -52,6 +52,6 @@
     }
   ],
   "action": {
-    "default_title": "SBC FutbinSync Dashboard"
+    "default_title": "Sync Dashboard"
   }
 }
