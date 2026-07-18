@@ -42,6 +42,7 @@ const MAX_ERRORS = 300;
 const FUTBIN_LATEST_URL = "https://www.futbin.com/latest";
 const WEB_APP_URL = "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/";
 const WEB_APP_SYNC_ENDPOINT = "sync/web-app";
+const NEW_SBC_TELEGRAM_ENDPOINT = "telegram/notify-new-sbcs-arrived";
 const LATEST_COIN_CARD_PAGES = 2;
 const SPECIAL_QUALITY_IMAGE_URL = "https://cdn3.futbin.com/content/fifa26/img/cards/tiny/3_gold.png?fm=png&ixlib=java-2.1.0&verzion=1&w=128&s=d72e95665680dee8e3818602d714323a";
 const EXTENSION_RUNNER_ID = "web-app-sync";
@@ -1069,6 +1070,36 @@ async function appendWebAppSchedulerLog(message, details = null) {
   }
 }
 
+async function notifyNewSbcsArrivedAfterWebAppSync(state) {
+  const runStartedAt = Number(state?.runStartedAt) || 0;
+  if (!runStartedAt) {
+    await appendWebAppSchedulerLog("Telegram notification skipped", {
+      reason: "runStartedAt not found"
+    });
+    return null;
+  }
+
+  const syncStartedAt = new Date(runStartedAt).toISOString();
+  try {
+    const response = await apiRequest(await resolveApiBaseUrl(state.apiBaseUrl), NEW_SBC_TELEGRAM_ENDPOINT, {
+      method: "POST",
+      body: JSON.stringify({ syncStartedAt })
+    });
+    await appendWebAppSchedulerLog("Telegram notification completed", {
+      syncStartedAt,
+      sent: response?.sent === true,
+      count: Number(response?.count) || 0
+    });
+    return response;
+  } catch (error) {
+    await appendWebAppSchedulerLog("Telegram notification failed", {
+      syncStartedAt,
+      message: error.message || String(error)
+    });
+    return null;
+  }
+}
+
 async function ensureWebAppDailySchedule() {
   if (EXTENSION_RUNNER_ID !== "web-app-sync") return null;
   const env = await getEnv();
@@ -1493,6 +1524,7 @@ async function handleWebAppSyncComplete(message, sender) {
     message: "Çalışma başarıyla tamamlandı",
     details: { progress: { stepId: 9, status: "completed", title: "Sekme kapatıldı ve final log yazıldı", detail: `${completed.dailyLogDate || adjustedDateParts().date} başarı kaydı` } }
   }, sender);
+  await notifyNewSbcsArrivedAfterWebAppSync(completed);
   if (!await isActiveRun(state)) return { ok: false, error: "Durdurulan çalışma tamamlanmadı." };
   await setState(completed);
   await closeRunnerTab(state.tabId, state);
