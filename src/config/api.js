@@ -3,7 +3,7 @@
   let readyPromise = null;
   const API_BASE_URL = normalizeBaseUrl(
     // "http://localhost:5055/api/"
-    "https://api.sbcmonster.com/"
+    "https://api.sbcmonster.com/api/"
   );
   const DEFAULT_WAIT_MS = 5000;
 
