@@ -130,30 +130,9 @@
     apiBaseUrlPromise = (async () => {
       const fromConfig = window.FutbinSyncApiConfig?.defaultBaseUrl?.();
       if (fromConfig) return normalizeBaseUrl(fromConfig);
-      try {
-        const response = await fetch(`${chrome.runtime.getURL(".env")}?t=${Date.now()}`, { cache: "no-store" });
-        const env = parseEnv(await response.text());
-        return normalizeBaseUrl(env.API_BASE_URL || "https://api.sbcmonster.com/");
-      } catch (error) {
-        console.warn("[WebAppSync][API_BRIDGE] .env okunamadı; production API fallback kullanılacak.", error);
-        return "https://api.sbcmonster.com/";
-      }
+      return "";
     })();
     return apiBaseUrlPromise;
-  }
-
-  function parseEnv(text) {
-    const values = {};
-    String(text || "").split(/\r?\n/).forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) return;
-      const separator = trimmed.indexOf("=");
-      if (separator < 0) return;
-      const key = trimmed.slice(0, separator).trim();
-      const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "");
-      if (key) values[key] = value;
-    });
-    return values;
   }
 
   function normalizeBaseUrl(value) {
@@ -161,7 +140,7 @@
       const url = new URL(value);
       return url.href.endsWith("/") ? url.href : `${url.href}/`;
     } catch {
-      return "https://api.sbcmonster.com/";
+      return "";
     }
   }
 

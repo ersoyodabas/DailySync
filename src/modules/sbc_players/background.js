@@ -561,6 +561,10 @@ async function submitSbcPlayers(job, players, _state, runToken) {
   try {
     response = await apiRequest(job.apiBaseUrl, "sbc", {
       method: "POST",
+      headers: {
+        "X-Sbc-Players-Sync": "true",
+        "X-App-User-Id": "1"
+      },
       body: JSON.stringify(payload)
     }, runToken);
   } catch (error) {
@@ -1014,9 +1018,15 @@ function buildSbcSavePayload(job, players, mappingDetails = []) {
   payload.sbc_player = players
     .map((player, index) => toSbcPlayerPayload(source, player, index, usedSlotIds, mappingDetails))
     .filter(Boolean);
+  payload.sbc_player.forEach((player) => {
+    player.user_id = 1;
+    player.system = true;
+  });
   if (players[0]?.squadUrl) payload.squad_link = players[0].squadUrl;
   payload.integration_date = new Date().toISOString();
   payload.update_date = new Date().toISOString();
+  payload.update_user_id = 1;
+  payload.user_id = 1;
   payload.group = false;
   return payload;
 }

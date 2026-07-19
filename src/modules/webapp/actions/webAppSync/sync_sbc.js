@@ -513,6 +513,7 @@
           : [];
 
         return {
+          user_id: 1,
           sort_no: Number(entry?.sort_no) || 0,
           icon_url: this.nonNullString(entry?.icon_url),
           name: this.buildLocalizedPayload(entry?.name, lang),

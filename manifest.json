@@ -33,6 +33,7 @@
         "https://signin.ea.com/*"
       ],
       "js": [
+        "src/config/api.js",
         "src/modules/webapp/actions/webAppSync/app.js",
         "src/modules/webapp/actions/webAppSync/sync_rarity.js",
         "src/modules/webapp/actions/webAppSync/sync_sbc.js",
@@ -45,6 +46,7 @@
     {
       "resources": [
         ".env",
+        "src/config/api.js",
         "src/assets/img/appLogoSmall.png",
         "src/modules/webapp/actions/webAppSync/page_api_bridge.js"
       ],

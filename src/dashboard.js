@@ -1,6 +1,6 @@
 const API_CONFIG = globalThis.FutbinSyncApiConfig;
 
-// Varsayılan sync ayarları .env içindeki API_BASE_URL değerinden gelir.
+// Varsayılan API adresi src/config/api.js içindeki tek merkezden gelir.
 let DEFAULT_API_BASE_URL = "";
 let DEFAULT_WAIT_MS = 5000;
 

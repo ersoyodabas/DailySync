@@ -9,7 +9,7 @@
     } catch {
       // Query okunamazsa global fallback denenir.
     }
-    return globalThis.FutbinSyncApiConfig?.defaultBaseUrl?.() || "https://api.sbcmonster.com/";
+    return globalThis.FutbinSyncApiConfig?.defaultBaseUrl?.() || "";
   })();
   const ALLOWED_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 

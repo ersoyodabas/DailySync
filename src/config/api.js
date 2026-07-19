@@ -1,6 +1,11 @@
 (function (global) {
   let envCache = null;
   let readyPromise = null;
+  const API_BASE_URL = normalizeBaseUrl(
+    // "http://localhost:5055/api/"
+    "https://api.sbcmonster.com/"
+  );
+  const DEFAULT_WAIT_MS = 5000;
 
   function parseEnv(text) {
     const values = {};
@@ -78,11 +83,11 @@
 
   function baseUrlFor(environment) {
     void environment;
-    return normalizeBaseUrl(get("API_BASE_URL"));
+    return API_BASE_URL;
   }
 
   function defaultBaseUrl() {
-    return normalizeBaseUrl(get("API_BASE_URL"));
+    return API_BASE_URL;
   }
 
   function allowedBaseUrl(value) {
@@ -104,6 +109,7 @@
     baseUrlFor,
     normalizeBaseUrl,
     allowedBaseUrl,
+    defaultWaitMs: () => DEFAULT_WAIT_MS,
     isLocal: () => false,
     isProduction: () => false
   });

@@ -222,7 +222,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
   const env = await getEnv();
   if (token !== runToken) return { ok: false, stopped: true, state: await getState(runnerId) };
 
-  const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl || env.API_BASE_URL || DEFAULT_API_BASE_URL);
+  const apiBaseUrl = normalizeApiBaseUrl(rawApiBaseUrl || DEFAULT_API_BASE_URL);
   const waitMs = Math.min(30000, Math.max(5000, Number(rawWaitMs || env.WAIT_MS) || 5000));
   const runStartedAt = Date.now();
 

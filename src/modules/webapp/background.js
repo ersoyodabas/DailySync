@@ -267,7 +267,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
     }
     const nextRunAt = config.nextRunAt;
     await chrome.alarms.clear(WEB_APP_DAILY_ALARM);
-    const apiBaseUrl = normalizeApiBaseUrl(env.API_BASE_URL || DEFAULT_API_BASE_URL);
+    const apiBaseUrl = normalizeApiBaseUrl(DEFAULT_API_BASE_URL);
     const waitMs = Math.min(30000, Math.max(5000, Number(rawWaitMs || env.WAIT_MS) || 5000));
     const scheduled = {
       ...previous,
@@ -300,8 +300,8 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
     return { ok: true, state: scheduled };
   }
   const apiBaseUrl = runnerId === "web-app-sync"
-    ? normalizeApiBaseUrl(env.API_BASE_URL || DEFAULT_API_BASE_URL)
-    : normalizeApiBaseUrl(rawApiBaseUrl || env.API_BASE_URL || API_CONFIG.defaultBaseUrl());
+    ? normalizeApiBaseUrl(DEFAULT_API_BASE_URL)
+    : normalizeApiBaseUrl(rawApiBaseUrl || API_CONFIG.defaultBaseUrl());
   const waitMs = Math.min(30000, Math.max(5000, Number(rawWaitMs || env.WAIT_MS) || 5000));
   const runStartedAt = Date.now();
 
@@ -1231,7 +1231,7 @@ async function runScheduledWebAppSync(existingState = null) {
   }
   const env = await getEnv();
   if (state.running) return { ok: true, state, alreadyRunning: true };
-  const apiBaseUrl = normalizeApiBaseUrl(env.API_BASE_URL || DEFAULT_API_BASE_URL);
+  const apiBaseUrl = normalizeApiBaseUrl(DEFAULT_API_BASE_URL);
   const waitMs = Math.min(30000, Math.max(5000, Number(env.WAIT_MS || state.waitMs) || emptyState.waitMs));
   await appendWebAppSchedulerLog("Synchronization started", {
     source: "daily-alarm",
@@ -1249,7 +1249,7 @@ function buildWebAppDailyScheduleConfig(env = {}) {
     nextRunAt: nextDailyRunAt(parsed.hour, parsed.minute, Date.now()),
     clockAdjustmentHours: 0,
     detectedTimeZone: runtimeTimeZone(),
-    apiBaseUrl: normalizeApiBaseUrl(env.API_BASE_URL || DEFAULT_API_BASE_URL),
+    apiBaseUrl: normalizeApiBaseUrl(DEFAULT_API_BASE_URL),
     waitMs: Math.min(30000, Math.max(5000, Number(env.WAIT_MS) || emptyState.waitMs))
   };
 }
@@ -2230,13 +2230,13 @@ function parseJsonForLog(value) {
 }
 
 function normalizeApiBaseUrl(value) {
-  return API_CONFIG.normalizeBaseUrl(value || API_CONFIG.defaultBaseUrl());
+  return API_CONFIG.allowedBaseUrl(value || API_CONFIG.defaultBaseUrl());
 }
 
 async function resolveApiBaseUrl(preferred = "") {
   const env = await getEnv();
-  const normalized = normalizeApiBaseUrl(preferred || env.API_BASE_URL || API_CONFIG.defaultBaseUrl() || DEFAULT_API_BASE_URL);
-  if (!normalized) throw new Error("API_BASE_URL .env dosyasında tanımlı değil veya geçersiz.");
+  const normalized = normalizeApiBaseUrl(preferred || API_CONFIG.defaultBaseUrl() || DEFAULT_API_BASE_URL);
+  if (!normalized) throw new Error("API base URL src/config/api.js içinde tanımlı değil veya geçersiz.");
   return normalized;
 }
 
